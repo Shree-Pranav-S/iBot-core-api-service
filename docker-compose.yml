@@ -1,0 +1,85 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: core-api-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-core_api_db}
+      POSTGRES_USER: ${POSTGRES_USER:-core_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-core_api_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - core_api_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: core-api-redis
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--save",
+        "60",
+        "1",
+        "--save",
+        "300",
+        "10",
+      ]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - core_api_network
+
+  core-api-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: core-api-backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_NAME: ${APP_NAME:-core-api-service}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-core_api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-core_api_password}
+      POSTGRES_DB: ${POSTGRES_DB:-core_api_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - core_api_network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  core_api_network:
+    driver: bridge

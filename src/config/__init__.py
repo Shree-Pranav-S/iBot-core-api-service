@@ -1,0 +1,5 @@
+"""Configuration helpers for core-api-service."""
+
+from src.config.settings import Settings, get_settings, settings
+
+__all__ = ["Settings", "get_settings", "settings"]

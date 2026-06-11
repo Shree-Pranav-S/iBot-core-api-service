@@ -1,0 +1,40 @@
+"""FastAPI application factory for core-api-service."""
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from src.api.middleware.error_handler import register_exception_handlers
+from src.api.middleware.logging import request_logging_middleware
+from src.api.rest.routes.auth import router as auth_router
+from src.api.rest.routes.health import router as health_router
+from src.api.rest.routes.internal import router as internal_router
+from src.config.settings import settings
+from src.data.clients.postgres_client import close_db, init_db
+from src.data.clients.redis_client import close_redis, init_redis
+from src.observability.logging import configure_logging
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await init_redis()
+    try:
+        yield
+    finally:
+        await close_redis()
+        await close_db()
+
+
+def create_app() -> FastAPI:
+    configure_logging()
+    app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+    register_exception_handlers(app)
+    app.middleware("http")(request_logging_middleware)
+    app.include_router(health_router)
+    app.include_router(auth_router)
+    app.include_router(internal_router)
+    return app
+
+
+app = create_app()
