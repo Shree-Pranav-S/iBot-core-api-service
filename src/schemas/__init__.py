@@ -28,6 +28,7 @@ from src.schemas.candidate import (
     CandidateAssessmentListItem,
     CandidateAssessmentResponse,
     CandidateResponse,
+    CandidateTokenValidationResponse,
     CSVRowResult,
     RecruiterDecisionRequest,
     RecruiterDecisionResponse,
@@ -73,6 +74,7 @@ __all__ = [
     "RecruiterDecisionRequest",
     "RecruiterDecisionResponse",
     "TokenValidationResponse",
+    "CandidateTokenValidationResponse",
     # notification
     "NotificationLogResponse",
     "SendInvitationPayload",

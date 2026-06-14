@@ -49,3 +49,24 @@ class NotFoundException(AppException):
 
     status_code = HTTPStatus.NOT_FOUND
     message = "Resource not found."
+
+
+class ForbiddenException(AppException):
+    """Raised when access is forbidden."""
+
+    status_code = HTTPStatus.FORBIDDEN
+    message = "Forbidden."
+
+
+class InternalServerException(AppException):
+    """Raised for generic internal server errors."""
+
+    status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+    message = "Internal server error."
+
+
+class BadGatewayException(AppException):
+    """Raised when an external API or service fails."""
+
+    status_code = HTTPStatus.BAD_GATEWAY
+    message = "Bad gateway."

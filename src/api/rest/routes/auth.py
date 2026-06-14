@@ -2,10 +2,15 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import get_db_session
+from src.core.exceptions import (
+    AuthenticationException,
+    BadRequestException,
+    NotFoundException,
+)
 from src.core.services.auth_service import AuthService
 from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
@@ -112,26 +117,19 @@ async def get_current_recruiter(
     """Return the recruiter profile for the authenticated session."""
 
     if not x_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing identity header — ensure request passes through the gateway.",
+        raise AuthenticationException(
+            "Missing identity header — ensure request passes through the gateway."
         )
 
     try:
         recruiter_id = uuid.UUID(x_user_id)
     except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid X-User-Id header format.",
-        )
+        raise BadRequestException("Invalid X-User-Id header format.")
 
     service = AuthService(AuthRepository(session))
     recruiter = await service._repository.get_recruiter_by_id(recruiter_id)
     if recruiter is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Recruiter not found.",
-        )
+        raise NotFoundException("Recruiter not found.")
 
     return APIResponse(
         message="Profile retrieved successfully.",

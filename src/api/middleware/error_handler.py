@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette import status
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.core.exceptions import AppException
 from src.schemas.common import ErrorDetail, ErrorResponse
@@ -49,6 +50,24 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=exc.status_code,
             message=exc.message,
             errors=errors,
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def starlette_http_exception_handler(
+        request: Request,
+        exc: StarletteHTTPException,
+    ) -> JSONResponse:
+        logger.warning(
+            "HTTP exception occurred",
+            extra={
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": exc.status_code,
+            },
+        )
+        return _json_error(
+            status_code=exc.status_code,
+            message=exc.detail,
         )
 
     @app.exception_handler(RequestValidationError)
