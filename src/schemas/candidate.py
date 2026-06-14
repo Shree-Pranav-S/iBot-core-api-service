@@ -125,3 +125,13 @@ class TokenValidationResponse(AppBaseModel):
     window_end: datetime
     status: str
     sections_overview: list[str]
+
+
+class CandidateTokenValidationResponse(AppBaseModel):
+    """
+    Response returned by internal token validation endpoint.
+    Used by gateway to authenticate candidate WebSocket connections.
+    """
+
+    candidate_id: uuid.UUID
+    assessment_id: uuid.UUID
