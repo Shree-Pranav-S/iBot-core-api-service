@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
     LLAMA_CLOUD_API_KEY: str = Field(default="")
 
+    BREVO_API_KEY: str = Field(default="")
+    BREVO_SENDER_EMAIL: str = Field(default="shreepranav067@gmail.com")
+    FRONTEND_URL: str = Field(default="http://localhost:5173")
+
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "core_api"
