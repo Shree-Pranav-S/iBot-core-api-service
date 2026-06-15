@@ -60,14 +60,28 @@ class CandidateAssessmentListItem(ORMBaseModel):
     GET /assessments/{id}/candidates
     """
 
-    candidate_assessment_id: uuid.UUID = Field(alias="id")
-    full_name: str = Field(alias="candidate.full_name")  # populated via join in repo
-    email: str = Field(alias="candidate.email")
+    id: uuid.UUID
+    full_name: str = ""
+    email: str = ""
     status: str
     resume_parse_status: str
     interview_started_at: datetime | None
     interview_ended_at: datetime | None
     recruiter_decision: str
+
+    @classmethod
+    def from_orm_with_candidate(cls, ca: object) -> "CandidateAssessmentListItem":
+        """Build from a CandidateAssessment ORM object with an eagerly loaded candidate."""
+        return cls(
+            id=ca.id,
+            full_name=ca.candidate.full_name if ca.candidate else "",
+            email=ca.candidate.email if ca.candidate else "",
+            status=ca.status,
+            resume_parse_status=ca.resume_parse_status,
+            interview_started_at=ca.interview_started_at,
+            interview_ended_at=ca.interview_ended_at,
+            recruiter_decision=ca.recruiter_decision,
+        )
 
 
 class CandidateAssessmentResponse(ORMBaseModel):
