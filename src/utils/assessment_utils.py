@@ -95,10 +95,44 @@ def generate_interview_plan(
     enough for roughly one question. If there is no meaningful leftover,
     or there are no minor skills, no bonus section is added.
     """
-    fixed_mins = 10.0
-    if duration_mins <= fixed_mins:
+    if duration_mins == 5:
+        sorted_skills = sorted(skills, key=lambda s: s.priority_score, reverse=True)
+        tech_skill = sorted_skills[0].skill if sorted_skills else "Technical"
+        tech_priority = sorted_skills[0].priority_score if sorted_skills else 10.0
+        return InterviewPlan(
+            total_mins=5,
+            sections=[
+                InterviewSection(
+                    section_name="self_intro",
+                    skill=None,
+                    allocated_mins=1.0,
+                    priority_score=None,
+                ),
+                InterviewSection(
+                    section_name=tech_skill,
+                    skill=tech_skill,
+                    allocated_mins=2.0,
+                    priority_score=tech_priority,
+                ),
+                InterviewSection(
+                    section_name="behavioural",
+                    skill=None,
+                    allocated_mins=1.0,
+                    priority_score=None,
+                ),
+                InterviewSection(
+                    section_name="cultural",
+                    skill=None,
+                    allocated_mins=1.0,
+                    priority_score=None,
+                ),
+            ],
+        )
+
+    fixed_mins = 5.0
+    if duration_mins < fixed_mins:
         raise BadRequestException(
-            f"Interview duration must be greater than {int(fixed_mins)} minutes to accommodate technical evaluation."
+            f"Interview duration must be at least {int(fixed_mins)} minutes."
         )
 
     remaining_mins = float(duration_mins - fixed_mins)
@@ -194,7 +228,7 @@ def generate_interview_plan(
         InterviewSection(
             section_name="self_intro",
             skill=None,
-            allocated_mins=2.0,
+            allocated_mins=1.0,
             priority_score=None,
         )
     ]
@@ -204,13 +238,13 @@ def generate_interview_plan(
             InterviewSection(
                 section_name="behavioural",
                 skill=None,
-                allocated_mins=4.0,
+                allocated_mins=2.0,
                 priority_score=None,
             ),
             InterviewSection(
                 section_name="cultural",
                 skill=None,
-                allocated_mins=4.0,
+                allocated_mins=2.0,
                 priority_score=None,
             ),
         ]
