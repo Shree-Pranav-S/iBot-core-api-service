@@ -36,7 +36,7 @@ async def validate_candidate_token(
 
     data = CandidateTokenValidationResponse(
         candidate_id=candidate_assessment.candidate_id,
-        assessment_id=candidate_assessment.assessment_id,
+        assessment_id=candidate_assessment.id,
     )
     return APIResponse(
         message="Token validation successful.",

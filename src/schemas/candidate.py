@@ -38,6 +38,16 @@ class BulkUploadResponse(AppBaseModel):
     overall_status: str
 
 
+class SingleCandidateResponse(AppBaseModel):
+    """Response for creating a single candidate manually."""
+
+    candidate_assessment_id: uuid.UUID
+    candidate_id: uuid.UUID
+    full_name: str
+    email: str
+    status: str
+
+
 # ── Candidate response schemas ────────────────────────────────────────────────
 
 

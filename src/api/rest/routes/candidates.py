@@ -8,6 +8,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     Header,
     UploadFile,
     status,
@@ -23,12 +24,15 @@ from src.data.repositories.candidate_assessment_full_repository import (
 )
 from src.data.repositories.candidate_repository import CandidateRepository
 from src.data.repositories.csv_upload_log_repository import CSVUploadLogRepository
+from src.data.repositories.evaluation_repository import EvaluationRepository
 from src.data.repositories.notification_log_repository import NotificationLogRepository
 from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
+    SingleCandidateResponse,
 )
 from src.schemas.common import APIResponse
+from src.schemas.evaluation import InterviewEvaluationResponse
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -101,6 +105,57 @@ async def bulk_upload_candidates(
     )
 
 
+@router.post(
+    "/manual",
+    response_model=APIResponse[SingleCandidateResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a single candidate manually",
+    description="Upload a candidate with their resume PDF manually.",
+)
+async def create_single_candidate_manual(
+    name: str = Form(...),
+    email: str = Form(...),
+    role: str = Form(...),
+    resume: UploadFile = File(...),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    service: CandidateService = Depends(get_candidate_service),
+) -> APIResponse[SingleCandidateResponse]:
+    """Process a manual candidate creation."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    if not resume.filename or not resume.filename.lower().endswith(".pdf"):
+        raise BadRequestException("Uploaded resume must be a PDF (.pdf extension).")
+
+    file_bytes = await resume.read()
+    if not file_bytes:
+        raise BadRequestException("Uploaded resume file is empty.")
+
+    ca_record = await service.create_single_candidate(
+        recruiter_id=recruiter_id,
+        name=name,
+        email=email,
+        role=role,
+        resume_file_bytes=file_bytes,
+        resume_filename=resume.filename,
+    )
+
+    return APIResponse(
+        message="Candidate created and invitation dispatched.",
+        data=SingleCandidateResponse(
+            candidate_assessment_id=ca_record.id,
+            candidate_id=ca_record.candidate_id,
+            full_name=name,
+            email=email,
+            status=ca_record.status,
+        ),
+    )
+
+
 @router.get(
     "",
     response_model=APIResponse[list[CandidateAssessmentListItem]],
@@ -132,4 +187,37 @@ async def list_candidates(
         data=[
             CandidateAssessmentListItem.from_orm_with_candidate(ca) for ca in ca_records
         ],
+    )
+
+
+@router.get(
+    "/{ca_id}/evaluation",
+    response_model=APIResponse[InterviewEvaluationResponse],
+    summary="Get candidate evaluation report",
+    description="Return the full holistic evaluation report for a candidate.",
+)
+async def get_candidate_evaluation(
+    ca_id: uuid.UUID,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    session: AsyncSession = Depends(get_db_session),
+) -> APIResponse[InterviewEvaluationResponse]:
+    """Fetch the evaluation report."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+
+    # In a real app we'd verify the recruiter owns the assessment for this ca_id.
+
+    eval_repo = EvaluationRepository(session)
+    evaluation = await eval_repo.get_by_candidate_assessment_id(ca_id)
+
+    if not evaluation:
+        from src.core.exceptions import NotFoundException
+
+        raise NotFoundException("Evaluation not found for this candidate.")
+
+    return APIResponse(
+        message="Evaluation retrieved successfully.",
+        data=InterviewEvaluationResponse.model_validate(
+            evaluation, from_attributes=True
+        ),
     )

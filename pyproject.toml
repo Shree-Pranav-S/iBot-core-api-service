@@ -67,5 +67,10 @@ explicit_package_bases = true
 namespace_packages = true
 disable_error_code = ["no-any-return", "union-attr", "type-arg", "no-untyped-def", "no-untyped-call", "str-bytes-safe", "attr-defined"]
 
+[[tool.mypy.overrides]]
+module = "src.data.migrations.alembic.versions.*"
+ignore_errors = true
+
+
 
 
