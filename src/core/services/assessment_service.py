@@ -15,9 +15,6 @@ from src.core.exceptions import (
 )
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
-from src.data.repositories.candidate_assessment_repository import (
-    CandidateAssessmentRepository,
-)
 from src.schemas.assessment import FocusAreaOverride
 from src.utils.assessment_utils import (
     generate_interview_plan,
@@ -150,8 +147,10 @@ class AssessmentService:
                 assessment.interview_duration_mins, jd_analysis.skills, focus_areas
             )
 
-            # Delegate DB flush to repository
-            await self._repository.activate_assessment(
+            # Delegate DB flush and commit to the repository classmethod
+            from src.data.repositories.assessment_repository import AssessmentRepository
+
+            await AssessmentRepository.activate_assessment_in_background(
                 assessment_id=assessment_id,
                 jd_text=parsed_jd_text,
                 jd_analysis=jd_analysis.model_dump(),
@@ -165,8 +164,14 @@ class AssessmentService:
                 "Failed to process assessment %s in background.", assessment_id
             )
             try:
-                # Set status to CLOSED to signal failure
-                await self._repository.close_assessment_on_failure(assessment_id)
+                # Set status to CLOSED to signal failure using the repository classmethod
+                from src.data.repositories.assessment_repository import (
+                    AssessmentRepository,
+                )
+
+                await AssessmentRepository.close_assessment_on_failure_in_background(
+                    assessment_id
+                )
             except Exception:
                 logger.exception(
                     "Failed to update status to CLOSED after error on assessment %s",
@@ -178,28 +183,31 @@ class AssessmentService:
     ) -> None:
         """Fetch all candidates for an assessment and dispatch cancellation emails."""
         try:
-            assessment = await self._repository.get_by_id(assessment_id)
-            if not assessment:
-                logger.error(
-                    "Assessment %s not found during cancellation email dispatch",
+            from src.data.repositories.candidate_assessment_repository import (
+                CandidateAssessmentRepository,
+            )
+
+            candidates_info = await CandidateAssessmentRepository.get_candidate_emails_for_assessment_in_background(
+                assessment_id
+            )
+
+            if not candidates_info:
+                logger.warning(
+                    "No candidates found or assessment missing during cancellation dispatch for %s",
                     assessment_id,
                 )
                 return
 
-            ca_repo = CandidateAssessmentRepository(self._repository._session)
-            ca_records = await ca_repo.get_all_by_assessment(assessment_id)
-
-            for ca in ca_records:
-                if ca.candidate and ca.candidate.email:
-                    # Fire and forget email dispatch
-                    asyncio.create_task(
-                        send_cancellation_email(
-                            candidate_name=ca.candidate.full_name,
-                            recipient_email=ca.candidate.email,
-                            assessment_title=assessment.title,
-                            role_name=assessment.role_name,
-                        )
+            for info in candidates_info:
+                # Fire and forget email dispatch
+                asyncio.create_task(
+                    send_cancellation_email(
+                        candidate_name=info["candidate_name"],
+                        recipient_email=info["recipient_email"],
+                        assessment_title=info["assessment_title"],
+                        role_name=info["role_name"],
                     )
+                )
 
             logger.info(
                 "Successfully dispatched cancellation emails for assessment %s",

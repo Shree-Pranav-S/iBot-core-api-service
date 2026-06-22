@@ -218,7 +218,6 @@ async def list_recruiter_evaluations(
 
     data: list[RecruiterEvaluationListItem] = []
     for evaluation, ca, candidate, assessment in rows:
-        red_flags = getattr(evaluation, "red_flags", None) or []
         data.append(
             RecruiterEvaluationListItem(
                 candidate_assessment_id=ca.id,
@@ -244,7 +243,7 @@ async def list_recruiter_evaluations(
                 total_candidates_evaluated=evaluation.total_candidates_evaluated,
                 strengths=evaluation.strengths,
                 concerns=evaluation.concerns,
-                red_flags_count=len(red_flags),
+                red_flags_count=0,
                 skill_scores=evaluation.skill_scores,
             )
         )

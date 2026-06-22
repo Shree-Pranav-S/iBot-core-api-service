@@ -65,3 +65,29 @@ class NotificationLogRepository:
             error_message=error_message,
         )
         await self._session.flush()
+
+    @classmethod
+    async def log_invitation_sent_in_background(
+        cls, ca_record_id: uuid.UUID, recipient_email: str
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.log_invitation_sent(ca_record_id, recipient_email)
+            await session.commit()
+
+    @classmethod
+    async def log_invitation_failed_in_background(
+        cls, ca_record_id: uuid.UUID, recipient_email: str, error_message: str
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.log_invitation_failed(
+                ca_record_id, recipient_email, error_message
+            )
+            await session.commit()

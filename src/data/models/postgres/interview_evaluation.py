@@ -22,16 +22,12 @@ class InterviewEvaluation(Base):
         default=uuid.uuid4,
         server_default=func.gen_random_uuid(),
     )
-
-    # Cross-service reference key
     candidate_assessment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
         unique=True,
         index=True,
     )
-
-    # ORM-only relationship
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("interview_sessions.id", ondelete="CASCADE"),
@@ -39,85 +35,25 @@ class InterviewEvaluation(Base):
         unique=True,
     )
 
-    # ------------------------------------------------------------------
-    # Technical dimension
-    # ------------------------------------------------------------------
+    skill_scores: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    technical_dimension_score: Mapped[float] = mapped_column(Float, nullable=False)
+    score_evidence: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    score_summary: Mapped[str] = mapped_column(Text, nullable=False)
 
-    skill_scores: Mapped[dict] = mapped_column(
-        JSONB,
-        nullable=False,
-    )
+    behavioural_score: Mapped[float] = mapped_column(Float, nullable=False)
+    behavioural_evidence: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    behavioural_summary: Mapped[str] = mapped_column(Text, nullable=False)
 
-    technical_dimension_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=False,
-    )
-
-    score_evidence: Mapped[list[str]] = mapped_column(
-        ARRAY(Text),
-        nullable=False,
-    )
-
-    score_summary: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Behavioural dimension
-    # ------------------------------------------------------------------
-
-    behavioural_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=False,
-    )
-
-    behavioural_evidence: Mapped[list[str]] = mapped_column(
-        ARRAY(Text),
-        nullable=False,
-    )
-
-    behavioural_summary: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Cultural fit dimension
-    # ------------------------------------------------------------------
-
-    cultural_fit_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=False,
-    )
-
+    cultural_fit_score: Mapped[float] = mapped_column(Float, nullable=False)
     cultural_fit_evidence: Mapped[list[str]] = mapped_column(
-        ARRAY(Text),
-        nullable=False,
+        ARRAY(Text), nullable=False
     )
-
-    cultural_fit_summary: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Tone analysis
-    # ------------------------------------------------------------------
+    cultural_fit_summary: Mapped[str] = mapped_column(Text, nullable=False)
 
     tone_classification_score: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
+        Float, nullable=True
     )
-
-    tone_distribution: Mapped[list | None] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
-
-    # ------------------------------------------------------------------
-    # Section summaries
-    # ------------------------------------------------------------------
+    tone_distribution: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     section_summaries: Mapped[dict] = mapped_column(
         JSONB,
@@ -126,92 +62,26 @@ class InterviewEvaluation(Base):
         server_default="{}",
     )
 
-    # ------------------------------------------------------------------
-    # Overall assessment
-    # ------------------------------------------------------------------
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    hiring_recommendation: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    overall_narrative: Mapped[str] = mapped_column(Text, nullable=False)
+    strengths: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    concerns: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    violation_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    best_answer: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    weakest_answer: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    recommendation_reasoning: Mapped[str] = mapped_column(Text, nullable=False)
 
-    overall_score: Mapped[float] = mapped_column(
-        Float,
-        nullable=False,
-    )
-
-    hiring_recommendation: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        index=True,
-    )
-
-    overall_narrative: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
-
-    strengths: Mapped[list[str]] = mapped_column(
-        ARRAY(Text),
-        nullable=False,
-    )
-
-    concerns: Mapped[list[str]] = mapped_column(
-        ARRAY(Text),
-        nullable=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Violations
-    # ------------------------------------------------------------------
-
-    violation_summary: Mapped[dict | None] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
-
-    # ------------------------------------------------------------------
-    # Highlight answers
-    # ------------------------------------------------------------------
-
-    best_answer: Mapped[dict | None] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
-
-    weakest_answer: Mapped[dict | None] = mapped_column(
-        JSONB,
-        nullable=True,
-    )
-
-    recommendation_reasoning: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-    )
-
-    # ------------------------------------------------------------------
-    # Ranking
-    # ------------------------------------------------------------------
-
-    rank_in_assessment: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-
-    percentile_in_assessment: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
-
+    rank_in_assessment: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    percentile_in_assessment: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_candidates_evaluated: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
+        Integer, nullable=True
     )
-
     generated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,
         server_default=func.now(),
     )
-
-    # ------------------------------------------------------------------
-    # Relationships
-    # ------------------------------------------------------------------
 
     session: Mapped["InterviewSession"] = relationship(
         back_populates="evaluation",
@@ -220,8 +90,6 @@ class InterviewEvaluation(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<InterviewEvaluation "
-            f"candidate_assessment_id={self.candidate_assessment_id} "
-            f"score={self.overall_score} "
-            f"recommendation={self.hiring_recommendation}>"
+            f"<InterviewEvaluation candidate_assessment_id={self.candidate_assessment_id} "
+            f"score={self.overall_score} recommendation={self.hiring_recommendation}>"
         )
