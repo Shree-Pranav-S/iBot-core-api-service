@@ -1,16 +1,13 @@
 """Assessment REST routes."""
 
-import json
 import logging
 import uuid
-from datetime import datetime
 
 from fastapi import (
     APIRouter,
     BackgroundTasks,
     Depends,
     File,
-    Form,
     Header,
     UploadFile,
     status,
@@ -28,10 +25,10 @@ from src.core.services.assessment_service import (
 )
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import (
+    AssessmentCreateForm,
     AssessmentResponse,
     AssessmentSummaryResponse,
     AssessmentUpdateStatusRequest,
-    FocusAreaOverride,
 )
 from src.schemas.common import APIResponse
 
@@ -55,16 +52,8 @@ def get_assessment_service(
 )
 async def create_assessment(
     background_tasks: BackgroundTasks,
-    title: str = Form(...),
-    role_name: str = Form(...),
-    interview_duration_mins: int = Form(...),
-    window_start: datetime = Form(...),
-    window_end: datetime = Form(...),
-    jd_text: str | None = Form(None),
+    form_data: AssessmentCreateForm = Depends(),
     jd_file: UploadFile | None = File(None),
-    focus_areas: str | None = Form(
-        None
-    ),  # Expecting JSON string: '[{"skill": "Python", "weight_override": 8.0}]'
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     service: AssessmentService = Depends(get_assessment_service),
 ) -> APIResponse[AssessmentResponse]:
@@ -79,17 +68,6 @@ async def create_assessment(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    focus_areas_list = []
-    if focus_areas:
-        try:
-            parsed = json.loads(focus_areas)
-            if isinstance(parsed, list):
-                focus_areas_list = [
-                    FocusAreaOverride.model_validate(item) for item in parsed
-                ]
-        except Exception as exc:
-            raise BadRequestException(f"Invalid focus_areas override payload: {exc}")
-
     file_bytes = None
     filename = None
     if jd_file:
@@ -98,25 +76,25 @@ async def create_assessment(
 
     assessment = await service.create_assessment(
         recruiter_id=recruiter_id,
-        title=title,
-        role_name=role_name,
-        duration_mins=interview_duration_mins,
-        window_start=window_start,
-        window_end=window_end,
-        jd_text=jd_text,
+        title=form_data.title,
+        role_name=form_data.role_name,
+        duration_mins=form_data.interview_duration_mins,
+        window_start=form_data.window_start,
+        window_end=form_data.window_end,
+        jd_text=form_data.jd_text,
         jd_file_bytes=file_bytes,
         jd_filename=filename,
-        focus_areas=focus_areas_list,
+        focus_areas=form_data.focus_areas,
     )
 
     # Queue the heavy parsing & analysis as a background task
     background_tasks.add_task(
         process_assessment_in_background,
         assessment.id,
-        jd_text,
+        form_data.jd_text,
         file_bytes,
         filename,
-        focus_areas_list,
+        form_data.focus_areas,
     )
 
     return APIResponse(

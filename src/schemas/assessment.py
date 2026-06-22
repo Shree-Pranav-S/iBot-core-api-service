@@ -4,11 +4,14 @@ Assessment schemas.
 Covers assessment creation, JD analysis structures, and response shapes.
 """
 
+import json
 import uuid
 from datetime import datetime
 
-from pydantic import Field, model_validator
+from fastapi import Form
+from pydantic import Field, ValidationError, model_validator
 
+from src.core.exceptions import BadRequestException
 from src.schemas.base import AppBaseModel, ORMBaseModel
 
 # ── Nested data structures ────────────────────────────────────────────────────
@@ -86,7 +89,7 @@ class AssessmentCreateRequest(AppBaseModel):
     jd_text: str | None = Field(
         None, description="Raw JD text; omit if uploading a PDF"
     )
-    interview_duration_mins: int = Field(..., ge=10, le=180)
+    interview_duration_mins: int = Field(..., ge=5, le=180)
     window_start: datetime
     window_end: datetime
     focus_areas: list[FocusAreaOverride] | None = None
@@ -96,6 +99,65 @@ class AssessmentCreateRequest(AppBaseModel):
         if self.window_end <= self.window_start:
             raise ValueError("window_end must be after window_start.")
         return self
+
+
+class AssessmentCreateForm:
+    """Dependency form wrapper for parsing multipart/form-data for assessment creation."""
+
+    def __init__(
+        self,
+        title: str = Form(...),
+        role_name: str = Form(...),
+        interview_duration_mins: int = Form(...),
+        window_start: datetime = Form(...),
+        window_end: datetime = Form(...),
+        jd_text: str | None = Form(None),
+        focus_areas: str | None = Form(
+            None,
+            description='Expecting JSON string: \'[{"skill": "Python", "weight_override": 8.0}]\'',
+        ),
+    ):
+        focus_areas_list = []
+        if focus_areas:
+            try:
+                parsed = json.loads(focus_areas)
+                if isinstance(parsed, list):
+                    focus_areas_list = [
+                        FocusAreaOverride.model_validate(item) for item in parsed
+                    ]
+            except Exception as exc:
+                raise BadRequestException(
+                    f"Invalid focus_areas override payload: {exc}"
+                )
+
+        try:
+            self.model = AssessmentCreateRequest(
+                title=title,
+                role_name=role_name,
+                interview_duration_mins=interview_duration_mins,
+                window_start=window_start,
+                window_end=window_end,
+                jd_text=jd_text,
+                focus_areas=focus_areas_list,
+            )
+        except ValidationError as val_err:
+            errors = val_err.errors()
+            err_msg = "; ".join(
+                [
+                    f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+                    for err in errors
+                ]
+            )
+            raise BadRequestException(f"Validation error: {err_msg}")
+
+        # Store validated attributes on the form instance for direct access
+        self.title = self.model.title
+        self.role_name = self.model.role_name
+        self.interview_duration_mins = self.model.interview_duration_mins
+        self.window_start = self.model.window_start
+        self.window_end = self.model.window_end
+        self.jd_text = self.model.jd_text
+        self.focus_areas = self.model.focus_areas
 
 
 class AssessmentUpdateStatusRequest(AppBaseModel):

@@ -28,7 +28,7 @@ async def validate_candidate_token(
     token: uuid.UUID,
     session: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[CandidateTokenValidationResponse]:
-    """Validate token and return candidate_id and assessment_id."""
+    """Validate token and return candidate and assessment identifiers."""
     repo = CandidateAssessmentRepository(session)
     candidate_assessment = await repo.get_by_invitation_token(token)
     if candidate_assessment is None:
@@ -36,7 +36,8 @@ async def validate_candidate_token(
 
     data = CandidateTokenValidationResponse(
         candidate_id=candidate_assessment.candidate_id,
-        assessment_id=candidate_assessment.id,
+        assessment_id=candidate_assessment.assessment_id,
+        candidate_assessment_id=candidate_assessment.id,
     )
     return APIResponse(
         message="Token validation successful.",

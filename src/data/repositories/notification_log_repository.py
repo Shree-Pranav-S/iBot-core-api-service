@@ -46,3 +46,22 @@ class NotificationLogRepository:
             },
         )
         return log
+
+    async def log_invitation_sent(self, ca_record_id, recipient_email):
+        await self.create(
+            candidate_assessment_id=ca_record_id,
+            notification_type="INVITATION",
+            recipient_email=recipient_email,
+            delivery_status="SENT",
+        )
+        await self._session.flush()
+
+    async def log_invitation_failed(self, ca_record_id, recipient_email, error_message):
+        await self.create(
+            candidate_assessment_id=ca_record_id,
+            notification_type="INVITATION",
+            recipient_email=recipient_email,
+            delivery_status="FAILED",
+            error_message=error_message,
+        )
+        await self._session.flush()

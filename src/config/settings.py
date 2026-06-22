@@ -18,11 +18,12 @@ class Settings(BaseSettings):
     APP_NAME: str = "core-api-service"
     APP_ENV: str = Field(default="development")
 
-    JWT_SECRET: str = Field(default="change-me-in-production")
+    JWT_SECRET: str = Field(default="sample_jwt_Key")
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     GROQ_API_KEY: str = Field(default="")
+    FALLBACK_GROQ_API_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
     LLAMA_CLOUD_API_KEY: str = Field(default="")
 

@@ -47,3 +47,10 @@ class CandidateRepository:
         await self._session.refresh(candidate)
         logger.info("Candidate created", extra={"candidate_id": str(candidate.id)})
         return candidate
+
+    async def update_candidate(self, candidate: Candidate) -> Candidate:
+        """Update and flush an existing candidate record."""
+        self._session.add(candidate)
+        await self._session.flush()
+        logger.info("Candidate updated", extra={"candidate_id": str(candidate.id)})
+        return candidate

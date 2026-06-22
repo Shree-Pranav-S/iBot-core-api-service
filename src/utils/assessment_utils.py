@@ -2,13 +2,9 @@
 
 import asyncio
 import logging
-import os
-import random
-import tempfile
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
-from llama_parse import LlamaParse
 
 from src.config.settings import settings
 from src.core.exceptions import (
@@ -28,51 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
-    """Parse PDF job description using LlamaParse in a background thread."""
-    api_key = settings.LLAMA_CLOUD_API_KEY
-    if not api_key:
-        raise BadRequestException(
-            "LlamaParse key not configured. Please paste the job description text instead."
-        )
+    """Parse PDF job description using PyMuPDF in a background thread."""
+    import fitz
 
-    suffix = os.path.splitext(filename)[1]
-    tmp_path = ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
+    def extract_text() -> str:
+        text = ""
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            for page in doc:
+                text += page.get_text() + "\n"
+        return text
 
     try:
-        parser = LlamaParse(api_key=api_key, result_type="markdown")
-        extra_info = {"file_name": filename}
-
-        last_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                documents = await asyncio.wait_for(
-                    run_in_threadpool(
-                        parser.load_data, tmp_path, extra_info=extra_info
-                    ),
-                    timeout=60,
-                )
-                return "\n".join(doc.text for doc in documents)
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if attempt == 0:
-                    logger.warning(
-                        "LlamaParse attempt 1 failed for %s, retrying once: %s",
-                        filename,
-                        exc,
-                    )
-                    continue
-        raise last_exc  # type: ignore[misc]
+        return await run_in_threadpool(extract_text)
     except Exception as exc:
-        logger.exception("Failed to parse PDF JD using LlamaParse")
+        logger.exception("Failed to parse PDF JD using PyMuPDF")
         raise InternalServerException(
             f"Error parsing job description file: {exc}"
         ) from exc
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 def generate_interview_plan(
@@ -82,18 +50,19 @@ def generate_interview_plan(
 ) -> InterviewPlan:
     """Create the base InterviewPlan with sections allocated proportionally based on priority weightings.
 
-    The number of "primary" skills considered for proportional allocation
-    scales with the available interview time — roughly one skill per
-    AVG_MINUTES_PER_SKILL minutes of remaining time (e.g. ~8 skills for a
-    45-minute interview), clamped to a sensible range.
+    The plan guarantees that the sum of allocated durations exactly matches
+    the total interview duration.
 
-    Skills beyond this primary set are not entirely discarded. If, after
-    allocating time to the primary skills, any time is left over (most
-    commonly because a low-weight primary skill's proportional share fell
-    below MIN_SECTION_MINS and was dropped), that leftover time is offered
-    to a single randomly-chosen "minor" skill as a short bonus section —
-    enough for roughly one question. If there is no meaningful leftover,
-    or there are no minor skills, no bonus section is added.
+    Non-technical sections (self-introduction, behavioral, cultural) scale
+    dynamically with the total interview duration to keep the balance natural:
+    - self_intro: 1.0 min for short sessions, else ~5% of duration (capped at 5 mins)
+    - behavioral: ~10% of duration (between 2 and 15 mins)
+    - cultural: ~10% of duration (between 2 and 15 mins)
+
+    Technical skills are filtered and allocated iteratively to ensure no active
+    technical section falls below a minimum threshold (e.g. 3.0 mins), preventing
+    highly fragmented interviews. Any leftover time is offered to the highest-priority
+    minor skill as a bonus section, with any final discrepancy resolved by normalization.
     """
     if duration_mins == 5:
         sorted_skills = sorted(skills, key=lambda s: s.priority_score, reverse=True)
@@ -135,80 +104,116 @@ def generate_interview_plan(
             f"Interview duration must be at least {int(fixed_mins)} minutes."
         )
 
-    remaining_mins = float(duration_mins - fixed_mins)
+    # 1. Dynamic Scaling of Non-Technical Sections
+    # self_intro: 1.0 min for < 15 mins, otherwise ~5% of total time, max 5.0 mins
+    if duration_mins < 15:
+        intro_mins = 1.0
+    else:
+        intro_mins = max(1.0, min(5.0, round(duration_mins * 0.05, 1)))
+
+    # behavioural & cultural: ~10% each, min 2.0 mins, max 15.0 mins
+    behavioral_mins = max(2.0, min(15.0, round(duration_mins * 0.10, 1)))
+    cultural_mins = max(2.0, min(15.0, round(duration_mins * 0.10, 1)))
+
+    non_tech_mins = round(intro_mins + behavioral_mins + cultural_mins, 1)
+    remaining_mins = max(0.0, round(duration_mins - non_tech_mins, 1))
+
+    # Focus area overrides mapping
     overrides = (
         {fa.skill: fa.weight_override for fa in focus_areas} if focus_areas else {}
     )
 
-    # CHANGED: max primary skills now scales with available time instead of
-    # a fixed value. AVG_MINUTES_PER_SKILL is calibrated so that a
-    # 45-minute interview (remaining_mins = 35) yields 8 primary skills:
-    # round(35 / 4.5) = 8.
-    AVG_MINUTES_PER_SKILL = 4.5
-    MIN_PRIMARY_SKILLS = 3
-    MAX_PRIMARY_SKILLS = 10
-    MIN_SECTION_MINS = 2.0
-    BONUS_MIN_MINS = 1.0
-    BONUS_SECTION_CAP_MINS = 5.0
+    # 2. Dynamic Primary Skills Cap to avoid fragmentation
+    # Target 5 minutes per primary technical skill.
+    TARGET_MINS_PER_SKILL = 5.0
+    MIN_PRIMARY_SKILLS = 2
+    MAX_PRIMARY_SKILLS = 15
+    MIN_TECH_SECTION_MINS = 3.0
 
     max_primary_skills = max(
         MIN_PRIMARY_SKILLS,
-        min(MAX_PRIMARY_SKILLS, round(remaining_mins / AVG_MINUTES_PER_SKILL)),
+        min(
+            MAX_PRIMARY_SKILLS,
+            int(remaining_mins // TARGET_MINS_PER_SKILL) if remaining_mins > 0 else 0,
+        ),
     )
 
-    # Sort all skills by priority once. The first max_primary_skills are
-    # "primary" (proportional allocation); the rest are "minor" (eligible
-    # only for the leftover-time bonus section).
+    # Sort all skills by priority score descending
     sorted_skills = sorted(skills, key=lambda s: s.priority_score, reverse=True)
     primary_skills = sorted_skills[:max_primary_skills]
     minor_skills = sorted_skills[max_primary_skills:]
 
-    tech_skills = []
-    for skill in primary_skills:
-        weight = float(overrides.get(skill.skill, skill.priority_score))
-        tech_skills.append((skill.skill, weight, skill.priority_score))
+    # Iterative allocation to filter out sub-threshold sections and redistribute time
+    active_primary = list(primary_skills)
+    tech_allocations: list[tuple[str, float, float]] = []
 
-    total_weight = sum(weight for _, weight, _ in tech_skills)
-    tech_sections = []
-    allocated_total = 0.0
+    while active_primary:
+        # Build active skills weights
+        tech_skills_weights = []
+        for skill in active_primary:
+            raw_weight = overrides.get(skill.skill, skill.priority_score)
+            weight = float(raw_weight) if raw_weight is not None else 5.0
+            tech_skills_weights.append((skill.skill, weight, skill.priority_score))
 
-    if total_weight > 0:
-        for skill_name, weight, original_priority in tech_skills:
+        total_weight = sum(w for _, w, _ in tech_skills_weights)
+        if total_weight <= 0:
+            break
+
+        # Calculate proportional allocations
+        temp_allocations = []
+        has_sub_threshold = False
+        lowest_sub_skill_idx = -1
+        lowest_sub_priority = float("inf")
+
+        for i, (skill_name, weight, priority) in enumerate(tech_skills_weights):
             allocated = round(remaining_mins * (weight / total_weight), 1)
+            temp_allocations.append((skill_name, allocated, priority))
 
-            if allocated < MIN_SECTION_MINS:
-                logger.info(
-                    "Skipping primary skill '%s' from interview plan — allocated %.1f min is below the %.1f min threshold",
-                    skill_name,
-                    allocated,
-                    MIN_SECTION_MINS,
-                )
-                continue
+            # Track the lowest priority skill that falls below the threshold
+            if allocated < MIN_TECH_SECTION_MINS:
+                has_sub_threshold = True
+                if priority < lowest_sub_priority:
+                    lowest_sub_priority = priority
+                    lowest_sub_skill_idx = i
 
-            tech_sections.append(
-                InterviewSection(
-                    section_name=skill_name,
-                    skill=skill_name,
-                    allocated_mins=allocated,
-                    priority_score=original_priority,
-                )
+        if not has_sub_threshold:
+            # All active sections satisfy the minimum threshold
+            tech_allocations = temp_allocations
+            break
+        else:
+            # Remove the lowest-priority sub-threshold skill from primary set,
+            # push it to minor skills, and re-allocate in the next iteration
+            removed_skill = active_primary.pop(lowest_sub_skill_idx)
+            minor_skills.append(removed_skill)
+            # Sort minor skills by priority again
+            minor_skills.sort(key=lambda s: s.priority_score, reverse=True)
+
+    # Build primary technical sections
+    tech_sections: list[InterviewSection] = []
+    allocated_total = 0.0
+    for skill_name, allocated, priority in tech_allocations:
+        tech_sections.append(
+            InterviewSection(
+                section_name=skill_name,
+                skill=skill_name,
+                allocated_mins=allocated,
+                priority_score=priority,
             )
-            allocated_total += allocated
+        )
+        allocated_total += allocated
 
-    # CHANGED: any time not used by the kept primary sections (e.g. because
-    # one or more low-weight primary skills were dropped, or due to rounding)
-    # becomes "leftover" time that can be offered to a minor skill.
+    # 3. Priority-Based Leftover Allocation to Minor Skills
     leftover_mins = round(remaining_mins - allocated_total, 1)
+    BONUS_MIN_MINS = 3.0
+    BONUS_SECTION_CAP_MINS = 5.0
 
     if minor_skills and leftover_mins >= BONUS_MIN_MINS:
-        # Dynamic: randomly pick one minor skill each time the plan is
-        # generated, so repeated runs for the same JD don't always favour
-        # the same "extra" skill.
-        bonus_skill = random.choice(minor_skills)
+        # Pick the highest-priority minor skill instead of random
+        bonus_skill = minor_skills[0]
         bonus_allocated = min(leftover_mins, BONUS_SECTION_CAP_MINS)
 
         logger.info(
-            "Allocating %.1f min bonus section to minor skill '%s' (1 question) from leftover time",
+            "Allocating %.1f min bonus section to highest-priority minor skill '%s' from leftover time",
             bonus_allocated,
             bonus_skill.skill,
         )
@@ -221,14 +226,17 @@ def generate_interview_plan(
                 priority_score=bonus_skill.priority_score,
             )
         )
+        allocated_total += bonus_allocated
 
-    tech_sections.sort(key=lambda section: section.priority_score or 0.0, reverse=True)
+    # Sort tech sections by priority descending (bonus sections have priority scores too)
+    tech_sections.sort(key=lambda s: s.priority_score or 0.0, reverse=True)
 
+    # Build final sections list
     sections = [
         InterviewSection(
             section_name="self_intro",
             skill=None,
-            allocated_mins=1.0,
+            allocated_mins=intro_mins,
             priority_score=None,
         )
     ]
@@ -238,17 +246,53 @@ def generate_interview_plan(
             InterviewSection(
                 section_name="behavioural",
                 skill=None,
-                allocated_mins=2.0,
+                allocated_mins=behavioral_mins,
                 priority_score=None,
             ),
             InterviewSection(
                 section_name="cultural",
                 skill=None,
-                allocated_mins=2.0,
+                allocated_mins=cultural_mins,
                 priority_score=None,
             ),
         ]
     )
+
+    # 4. Zero-Waste Time Normalization
+    # Ensure the sum of all sections matches duration_mins exactly
+    total_allocated = round(sum(s.allocated_mins for s in sections), 1)
+    discrepancy = round(duration_mins - total_allocated, 1)
+
+    if discrepancy != 0.0:
+        # Find the largest tech section to adjust
+        tech_indices = [
+            i
+            for i, s in enumerate(sections)
+            if s.skill is not None and not s.section_name.startswith("bonus_")
+        ]
+        if tech_indices:
+            # Sort tech indices by allocated mins descending, pick the largest
+            tech_indices.sort(
+                key=lambda idx: sections[idx].allocated_mins, reverse=True
+            )
+            target_idx = tech_indices[0]
+            new_allocated = round(sections[target_idx].allocated_mins + discrepancy, 1)
+            # Ensure it doesn't fall below absolute min
+            sections[target_idx].allocated_mins = max(
+                MIN_TECH_SECTION_MINS, new_allocated
+            )
+        else:
+            # Fallback to adjusting behavioural section if no tech sections exist
+            for i, s in enumerate(sections):
+                if s.section_name == "behavioural":
+                    sections[i].allocated_mins = round(
+                        s.allocated_mins + discrepancy, 1
+                    )
+                    break
+
+    # Re-verify and final check
+    for s in sections:
+        s.allocated_mins = round(s.allocated_mins, 1)
 
     return InterviewPlan(total_mins=duration_mins, sections=sections)
 

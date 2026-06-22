@@ -1,11 +1,10 @@
-"""Candidate REST routes — bulk CSV upload and candidate listing."""
+"""Candidate REST routes - bulk CSV upload and candidate listing."""
 
 import logging
 import uuid
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -19,20 +18,24 @@ from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import AuthenticationException, BadRequestException
 from src.core.services.candidate_service import CandidateService
 from src.data.repositories.assessment_repository import AssessmentRepository
-from src.data.repositories.candidate_assessment_full_repository import (
-    CandidateAssessmentFullRepository,
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
 from src.data.repositories.csv_upload_log_repository import CSVUploadLogRepository
 from src.data.repositories.evaluation_repository import EvaluationRepository
-from src.data.repositories.notification_log_repository import NotificationLogRepository
 from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
+    RecruiterDecisionRequest,
+    RecruiterDecisionResponse,
     SingleCandidateResponse,
 )
 from src.schemas.common import APIResponse
-from src.schemas.evaluation import InterviewEvaluationResponse
+from src.schemas.evaluation import (
+    InterviewEvaluationResponse,
+    RecruiterEvaluationListItem,
+)
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -44,10 +47,9 @@ def get_candidate_service(
     """Build the candidate service from request-scoped dependencies."""
     return CandidateService(
         candidate_repo=CandidateRepository(session),
-        ca_repo=CandidateAssessmentFullRepository(session),
+        ca_repo=CandidateAssessmentRepository(session),
         assessment_repo=AssessmentRepository(session),
         upload_log_repo=CSVUploadLogRepository(session),
-        notification_log_repo=NotificationLogRepository(session),
     )
 
 
@@ -64,7 +66,6 @@ def get_candidate_service(
     ),
 )
 async def bulk_upload_candidates(
-    background_tasks: BackgroundTasks,
     csv_file: UploadFile = File(
         ...,
         description="CSV file with columns: name, email, resume, role",
@@ -75,7 +76,7 @@ async def bulk_upload_candidates(
     """Process a CSV bulk upload, create candidates, and dispatch invitation emails."""
     if not x_user_id:
         raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
+            "Missing identity header - ensure request passes through the gateway."
         )
 
     try:
@@ -160,17 +161,17 @@ async def create_single_candidate_manual(
     "",
     response_model=APIResponse[list[CandidateAssessmentListItem]],
     summary="List candidates for an assessment",
-    description="Return all candidate-assessment records for the given assessment ID.",
+    description="Return all candidate-assessment records for the given assessment ID. If assessment_id is not specified, return all candidates for the recruiter.",
 )
 async def list_candidates(
-    assessment_id: uuid.UUID,
+    assessment_id: uuid.UUID | None = None,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     service: CandidateService = Depends(get_candidate_service),
 ) -> APIResponse[list[CandidateAssessmentListItem]]:
-    """Return all candidates registered under a specific assessment."""
+    """Return candidates registered under a specific assessment, or all candidates for the recruiter."""
     if not x_user_id:
         raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
+            "Missing identity header - ensure request passes through the gateway."
         )
 
     try:
@@ -178,15 +179,117 @@ async def list_candidates(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    ca_records = await service.get_candidates_for_assessment(
-        assessment_id, recruiter_id
-    )
+    if assessment_id:
+        ca_records = await service.get_candidates_for_assessment(
+            assessment_id, recruiter_id
+        )
+    else:
+        ca_records = await service.get_all_candidates_for_recruiter(recruiter_id)
 
     return APIResponse(
         message="Candidates retrieved successfully.",
         data=[
             CandidateAssessmentListItem.from_orm_with_candidate(ca) for ca in ca_records
         ],
+    )
+
+
+@router.get(
+    "/evaluations",
+    response_model=APIResponse[list[RecruiterEvaluationListItem]],
+    summary="List evaluated interviews for recruiter",
+    description="Return all completed interview evaluations for assessments owned by the recruiter.",
+)
+async def list_recruiter_evaluations(
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    session: AsyncSession = Depends(get_db_session),
+) -> APIResponse[list[RecruiterEvaluationListItem]]:
+    """Return recruiter-owned candidate evaluations for the dashboard."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    eval_repo = EvaluationRepository(session)
+    rows = await eval_repo.list_by_recruiter(recruiter_id)
+
+    data: list[RecruiterEvaluationListItem] = []
+    for evaluation, ca, candidate, assessment in rows:
+        red_flags = getattr(evaluation, "red_flags", None) or []
+        data.append(
+            RecruiterEvaluationListItem(
+                candidate_assessment_id=ca.id,
+                candidate_name=candidate.full_name,
+                candidate_email=candidate.email,
+                assessment_id=assessment.id,
+                assessment_title=assessment.title,
+                role_name=assessment.role_name,
+                recruiter_decision=ca.recruiter_decision,
+                interview_started_at=ca.interview_started_at,
+                interview_ended_at=ca.interview_ended_at,
+                generated_at=evaluation.generated_at,
+                overall_score=evaluation.overall_score,
+                hiring_recommendation=evaluation.hiring_recommendation,
+                recommendation_reasoning=evaluation.recommendation_reasoning,
+                overall_narrative=evaluation.overall_narrative,
+                technical_dimension_score=evaluation.technical_dimension_score,
+                behavioural_score=evaluation.behavioural_score,
+                cultural_fit_score=evaluation.cultural_fit_score,
+                tone_classification_score=evaluation.tone_classification_score,
+                rank_in_assessment=evaluation.rank_in_assessment,
+                percentile_in_assessment=evaluation.percentile_in_assessment,
+                total_candidates_evaluated=evaluation.total_candidates_evaluated,
+                strengths=evaluation.strengths,
+                concerns=evaluation.concerns,
+                red_flags_count=len(red_flags),
+                skill_scores=evaluation.skill_scores,
+            )
+        )
+
+    return APIResponse(
+        message="Evaluations retrieved successfully.",
+        data=data,
+    )
+
+
+@router.post(
+    "/{ca_id}/decision",
+    response_model=APIResponse[RecruiterDecisionResponse],
+    summary="Update recruiter hiring decision",
+    description="Approve or reject a candidate after reviewing their evaluation.",
+)
+async def update_recruiter_decision(
+    ca_id: uuid.UUID,
+    payload: RecruiterDecisionRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    service: CandidateService = Depends(get_candidate_service),
+) -> APIResponse[RecruiterDecisionResponse]:
+    """Persist the recruiter decision for a candidate assessment."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    ca = await service.update_recruiter_decision(
+        ca_id=ca_id,
+        recruiter_id=recruiter_id,
+        decision=payload.decision,
+        feedback=payload.feedback,
+    )
+
+    return APIResponse(
+        message="Recruiter decision updated successfully.",
+        data=RecruiterDecisionResponse(
+            candidate_assessment_id=ca.id,
+            recruiter_decision=ca.recruiter_decision,
+            updated_at=ca.updated_at,
+        ),
     )
 
 
@@ -205,7 +308,21 @@ async def get_candidate_evaluation(
     if not x_user_id:
         raise AuthenticationException("Missing identity header.")
 
-    # In a real app we'd verify the recruiter owns the assessment for this ca_id.
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    ca_repo = CandidateAssessmentRepository(session)
+    ca = await ca_repo.get_by_id(ca_id)
+    if ca is None:
+        from src.core.exceptions import NotFoundException
+
+        raise NotFoundException("Candidate registration not found.")
+    if ca.assessment.recruiter_id != recruiter_id:
+        from src.core.exceptions import ForbiddenException
+
+        raise ForbiddenException("You do not have access to this evaluation.")
 
     eval_repo = EvaluationRepository(session)
     evaluation = await eval_repo.get_by_candidate_assessment_id(ca_id)
@@ -220,4 +337,31 @@ async def get_candidate_evaluation(
         data=InterviewEvaluationResponse.model_validate(
             evaluation, from_attributes=True
         ),
+    )
+
+
+@router.delete(
+    "/{ca_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=APIResponse[None],
+    summary="Delete candidate from assessment",
+    description="Remove a candidate registration from an assessment and delete their interview session.",
+)
+async def delete_candidate(
+    ca_id: uuid.UUID,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    service: CandidateService = Depends(get_candidate_service),
+) -> APIResponse[None]:
+    """Delete a candidate registration from an assessment."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    await service.delete_candidate_from_assessment(ca_id, recruiter_id)
+    return APIResponse(
+        message="Candidate removed from assessment successfully.",
+        data=None,
     )

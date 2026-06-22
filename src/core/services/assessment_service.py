@@ -1,5 +1,6 @@
 """Business logic for recruiter assessments, JD analysis, and interview planning."""
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -14,12 +15,16 @@ from src.core.exceptions import (
 )
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
+)
 from src.schemas.assessment import FocusAreaOverride
 from src.utils.assessment_utils import (
     generate_interview_plan,
     parse_pdf_jd,
     run_jd_analysis,
 )
+from src.utils.candidates import send_cancellation_email
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +58,21 @@ class AssessmentService:
     ) -> Assessment:
         """Update the status of an assessment."""
         assessment = await self.get_assessment_by_id(assessment_id, recruiter_id)
-        assessment.status = new_status
-        await self._repository._session.flush()
+
+        # If it's being closed from an active state, notify candidates
+        if assessment.status != "CLOSED" and new_status == "CLOSED":
+            asyncio.create_task(
+                self.send_cancellation_emails_in_background(assessment_id)
+            )
+
+        updated_assessment = await self._repository.update_status(
+            assessment, new_status
+        )
         logger.info(
             "Assessment status updated",
-            extra={"assessment_id": str(assessment.id), "status": new_status},
+            extra={"assessment_id": str(updated_assessment.id), "status": new_status},
         )
-        return assessment
+        return updated_assessment
 
     async def create_assessment(
         self,
@@ -103,26 +116,17 @@ class AssessmentService:
 
         return await self._repository.create_assessment(db_assessment)
 
-
-async def process_assessment_in_background(
-    assessment_id: uuid.UUID,
-    jd_text: str | None = None,
-    jd_file_bytes: bytes | None = None,
-    jd_filename: str | None = None,
-    focus_areas: list[FocusAreaOverride] | None = None,
-) -> None:
-    """Background task to parse PDF, run LLM analysis, generate plan, and activate assessment."""
-    from groq import AsyncGroq
-
-    from src.config.settings import settings
-    from src.data.clients.postgres_client import get_session_factory
-    from src.data.repositories.assessment_repository import AssessmentRepository
-
-    SessionLocal = await get_session_factory()
-    async with SessionLocal() as session:
+    async def process_assessment_in_background(
+        self,
+        assessment_id: uuid.UUID,
+        jd_text: str | None = None,
+        jd_file_bytes: bytes | None = None,
+        jd_filename: str | None = None,
+        focus_areas: list[FocusAreaOverride] | None = None,
+    ) -> None:
+        """Background task to parse PDF, run LLM analysis, generate plan, and activate assessment."""
         try:
-            repo = AssessmentRepository(session)
-            assessment = await repo.get_by_id(assessment_id)
+            assessment = await self._repository.get_by_id(assessment_id)
             if not assessment:
                 logger.error(
                     "Assessment %s not found in background task.", assessment_id
@@ -138,22 +142,21 @@ async def process_assessment_in_background(
             if not parsed_jd_text.strip():
                 raise ValueError("Job description content is empty.")
 
-            assessment.jd_text = parsed_jd_text
-
             # Run LLM analysis
-            groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-            jd_analysis = await run_jd_analysis(parsed_jd_text, groq_client)
-            assessment.jd_analysis = jd_analysis.model_dump()
+            jd_analysis = await run_jd_analysis(parsed_jd_text, self._groq_client)
 
             # Generate Interview Plan
             interview_plan = generate_interview_plan(
                 assessment.interview_duration_mins, jd_analysis.skills, focus_areas
             )
-            assessment.interview_plan = interview_plan.model_dump()
 
-            # Set status to ACTIVE
-            assessment.status = "ACTIVE"
-            await session.commit()
+            # Delegate DB flush to repository
+            await self._repository.activate_assessment(
+                assessment_id=assessment_id,
+                jd_text=parsed_jd_text,
+                jd_analysis=jd_analysis.model_dump(),
+                interview_plan=interview_plan.model_dump(),
+            )
             logger.info(
                 "Successfully processed assessment %s asynchronously.", assessment_id
             )
@@ -163,13 +166,47 @@ async def process_assessment_in_background(
             )
             try:
                 # Set status to CLOSED to signal failure
-                repo = AssessmentRepository(session)
-                assessment = await repo.get_by_id(assessment_id)
-                if assessment:
-                    assessment.status = "CLOSED"
-                    await session.commit()
+                await self._repository.close_assessment_on_failure(assessment_id)
             except Exception:
                 logger.exception(
                     "Failed to update status to CLOSED after error on assessment %s",
                     assessment_id,
                 )
+
+    async def send_cancellation_emails_in_background(
+        self, assessment_id: uuid.UUID
+    ) -> None:
+        """Fetch all candidates for an assessment and dispatch cancellation emails."""
+        try:
+            assessment = await self._repository.get_by_id(assessment_id)
+            if not assessment:
+                logger.error(
+                    "Assessment %s not found during cancellation email dispatch",
+                    assessment_id,
+                )
+                return
+
+            ca_repo = CandidateAssessmentRepository(self._repository._session)
+            ca_records = await ca_repo.get_all_by_assessment(assessment_id)
+
+            for ca in ca_records:
+                if ca.candidate and ca.candidate.email:
+                    # Fire and forget email dispatch
+                    asyncio.create_task(
+                        send_cancellation_email(
+                            candidate_name=ca.candidate.full_name,
+                            recipient_email=ca.candidate.email,
+                            assessment_title=assessment.title,
+                            role_name=assessment.role_name,
+                        )
+                    )
+
+            logger.info(
+                "Successfully dispatched cancellation emails for assessment %s",
+                assessment_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch cancellation emails for assessment %s",
+                assessment_id,
+            )

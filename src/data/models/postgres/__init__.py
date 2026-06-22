@@ -8,7 +8,6 @@ Import all models here so that:
        from src.data.models.postgres import Recruiter, Assessment, ...
 """
 
-from src.data.models.postgres.answer_evaluation import AnswerEvaluation
 from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.audit_log import AuditLog
 from src.data.models.postgres.base import Base
@@ -21,7 +20,6 @@ from src.data.models.postgres.mixins import TimestampMixin
 from src.data.models.postgres.notification_log import NotificationLog
 from src.data.models.postgres.recruiter import Recruiter
 from src.data.models.postgres.recruiter_token import RecruiterToken
-from src.data.models.postgres.transcript_turn import TranscriptTurn
 
 __all__ = [
     "Base",
@@ -35,7 +33,5 @@ __all__ = [
     "NotificationLog",
     "AuditLog",
     "InterviewSession",
-    "TranscriptTurn",
-    "AnswerEvaluation",
     "InterviewEvaluation",
 ]

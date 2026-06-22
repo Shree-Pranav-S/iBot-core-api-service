@@ -12,7 +12,7 @@ from pydantic import Field
 
 from src.schemas.base import AppBaseModel, ORMBaseModel
 
-# ── CSV upload schemas ────────────────────────────────────────────────────────
+# CSV upload schemas
 
 
 class CSVRowResult(AppBaseModel):
@@ -27,7 +27,7 @@ class CSVRowResult(AppBaseModel):
 class BulkUploadResponse(AppBaseModel):
     """
     POST /assessments/{id}/candidates/bulk-upload response.
-    Returned immediately — Celery processes rows asynchronously.
+    Returned immediately - Celery processes rows asynchronously.
     """
 
     upload_id: uuid.UUID
@@ -48,7 +48,7 @@ class SingleCandidateResponse(AppBaseModel):
     status: str
 
 
-# ── Candidate response schemas ────────────────────────────────────────────────
+# Candidate response schemas
 
 
 class CandidateResponse(ORMBaseModel):
@@ -61,7 +61,7 @@ class CandidateResponse(ORMBaseModel):
     created_at: datetime
 
 
-# ── CandidateAssessment schemas ───────────────────────────────────────────────
+# CandidateAssessment schemas
 
 
 class CandidateAssessmentListItem(ORMBaseModel):
@@ -78,6 +78,11 @@ class CandidateAssessmentListItem(ORMBaseModel):
     interview_started_at: datetime | None
     interview_ended_at: datetime | None
     recruiter_decision: str
+    assessment_id: uuid.UUID | None = None
+    role_name: str = ""
+    resume_parsed: dict | None = None
+    resume_file_path: str | None = None
+    jd_text: str | None = ""
 
     @classmethod
     def from_orm_with_candidate(cls, ca: object) -> "CandidateAssessmentListItem":
@@ -91,6 +96,11 @@ class CandidateAssessmentListItem(ORMBaseModel):
             interview_started_at=ca.interview_started_at,
             interview_ended_at=ca.interview_ended_at,
             recruiter_decision=ca.recruiter_decision,
+            assessment_id=ca.assessment_id,
+            role_name=ca.assessment.role_name if ca.assessment else "",
+            resume_parsed=ca.resume_parsed,
+            resume_file_path=ca.resume_file_path,
+            jd_text=ca.assessment.jd_text if ca.assessment else "",
         )
 
 
@@ -112,7 +122,7 @@ class CandidateAssessmentResponse(ORMBaseModel):
     updated_at: datetime
 
 
-# ── Recruiter decision schema ─────────────────────────────────────────────────
+# Recruiter decision schema
 
 
 class RecruiterDecisionRequest(AppBaseModel):
@@ -134,7 +144,7 @@ class RecruiterDecisionResponse(ORMBaseModel):
     updated_at: datetime
 
 
-# ── Token validation schema (candidate-facing) ────────────────────────────────
+# Token validation schema (candidate-facing)
 
 
 class TokenValidationResponse(AppBaseModel):
@@ -159,3 +169,4 @@ class CandidateTokenValidationResponse(AppBaseModel):
 
     candidate_id: uuid.UUID
     assessment_id: uuid.UUID
+    candidate_assessment_id: uuid.UUID

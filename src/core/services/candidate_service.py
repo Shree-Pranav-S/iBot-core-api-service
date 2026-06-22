@@ -4,6 +4,7 @@ import asyncio
 import csv
 import io
 import logging
+import os
 import uuid
 
 from src.config.settings import settings
@@ -14,14 +15,20 @@ from src.core.exceptions import (
 )
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.repositories.assessment_repository import AssessmentRepository
-from src.data.repositories.candidate_assessment_full_repository import (
-    CandidateAssessmentFullRepository,
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
 from src.data.repositories.csv_upload_log_repository import CSVUploadLogRepository
-from src.data.repositories.notification_log_repository import NotificationLogRepository
+from src.data.repositories.notification_log_repository import (
+    NotificationLogRepository,
+)
 from src.schemas.candidate import BulkUploadResponse, CSVRowResult
-from src.utils.candidates import _send_invitation_email
+from src.utils.candidates import (
+    download_resume,
+    parse_resume_from_file,
+    send_invitation_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,16 +42,14 @@ class CandidateService:
     def __init__(
         self,
         candidate_repo: CandidateRepository,
-        ca_repo: CandidateAssessmentFullRepository,
+        ca_repo: CandidateAssessmentRepository,
         assessment_repo: AssessmentRepository,
         upload_log_repo: CSVUploadLogRepository,
-        notification_log_repo: NotificationLogRepository,
     ) -> None:
         self._candidate_repo = candidate_repo
         self._ca_repo = ca_repo
         self._assessment_repo = assessment_repo
         self._upload_log_repo = upload_log_repo
-        self._notification_log_repo = notification_log_repo
 
     async def get_candidates_for_assessment(
         self, assessment_id: uuid.UUID, recruiter_id: uuid.UUID
@@ -70,7 +75,7 @@ class CandidateService:
         The CSV must contain columns: name, email, resume, role.
         Role matching is case-insensitive against active assessments owned by this recruiter.
         """
-        # ── Parse CSV ────────────────────────────────────────────────────────
+        # Parse CSV
         try:
             text = file_bytes.decode("utf-8-sig")  # handles BOM
         except UnicodeDecodeError:
@@ -92,21 +97,21 @@ class CandidateService:
         if not rows:
             raise BadRequestException("CSV file contains no data rows.")
 
-        # ── Load all active assessments owned by this recruiter ───────────────
+        # Load all active assessments owned by this recruiter
         all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
         # Build a role_name -> assessment lookup (case-insensitive)
         role_assessment_map: dict[str, object] = {
             a.role_name.strip().lower(): a for a in all_assessments
         }
 
-        # ── Create the upload log record immediately ──────────────────────────
+        # Create the upload log record immediately
         total_rows = len(rows)
         # Use the first matching assessment for the log (or a placeholder UUID)
         # We defer associating to assessment_id until we know the overall dominant one.
         # For simplicity, use a sentinel and update per-row.
         # We'll use recruiter's first assessment for the log, or handle per-row.
         # Since CSV can have multiple roles, we'll use None and handle below.
-        # Actually: create one log per CSV upload — use assessment_id from first successful row.
+        # Actually: create one log per CSV upload - use assessment_id from first successful row.
 
         row_results: list[CSVRowResult] = []
         successful_rows = 0
@@ -139,7 +144,7 @@ class CandidateService:
                 failed_rows += 1
                 continue
 
-            # ── Role matching ─────────────────────────────────────────────────
+            # Role matching
             matched_assessment = role_assessment_map.get(role.lower())
             if matched_assessment is None:
                 row_results.append(
@@ -156,7 +161,7 @@ class CandidateService:
                 failed_rows += 1
                 continue
 
-            # ── Upsert Candidate ──────────────────────────────────────────────
+            #  Upsert Candidate
             try:
                 existing_candidate = await self._candidate_repo.get_by_email(email)
                 if existing_candidate is None:
@@ -167,8 +172,11 @@ class CandidateService:
                     )
                 else:
                     candidate = existing_candidate
+                    if name and candidate.full_name != name:
+                        candidate.full_name = name
+                        await self._candidate_repo.update_candidate(candidate)
 
-                # ── Link to assessment (skip if already linked) ───────────────
+                # Link to assessment (skip if already linked)
                 existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
                     candidate.id, matched_assessment.id
                 )
@@ -221,7 +229,7 @@ class CandidateService:
                 )
                 failed_rows += 1
 
-        # ── Create the CSV upload log ─────────────────────────────────────────
+        #  Create the CSV upload log
         # Use dominant assessment id or fall back to the first available assessment
         log_assessment_id = dominant_assessment_id or (
             all_assessments[0].id if all_assessments else None
@@ -229,15 +237,7 @@ class CandidateService:
 
         upload_log = None
         if log_assessment_id is not None:
-            upload_log = await self._upload_log_repo.create(
-                recruiter_id=recruiter_id,
-                assessment_id=log_assessment_id,
-                total_rows=total_rows,
-            )
-            upload_log.successful_rows = successful_rows
-            upload_log.failed_rows = failed_rows
-            upload_log.row_results = [r.model_dump() for r in row_results]
-            upload_log.overall_status = (
+            overall_status = (
                 "COMPLETED"
                 if failed_rows == 0
                 else (
@@ -246,8 +246,17 @@ class CandidateService:
                     else "COMPLETED_WITH_ERRORS"
                 )
             )
+            upload_log = await self._upload_log_repo.create(
+                recruiter_id=recruiter_id,
+                assessment_id=log_assessment_id,
+                total_rows=total_rows,
+                successful_rows=successful_rows,
+                failed_rows=failed_rows,
+                row_results=[r.model_dump() for r in row_results],
+                overall_status=overall_status,
+            )
 
-        # ── Dispatch invitation emails as background tasks ────────────────────
+        #  Dispatch invitation emails as background tasks
         for (
             ca_record,
             assessment,
@@ -259,7 +268,7 @@ class CandidateService:
             )
             # Fire-and-forget email: log but don't fail the upload on email error
             asyncio.create_task(
-                _dispatch_invitation_with_logging(
+                self.dispatch_invitation_with_logging(
                     ca_record_id=ca_record.id,
                     candidate_name=candidate_name,
                     recipient_email=recipient_email,
@@ -272,7 +281,7 @@ class CandidateService:
             # Fire-and-forget resume download and parsing
             if ca_record.resume_file_path:
                 asyncio.create_task(
-                    process_candidate_resume_in_background(
+                    self.process_candidate_resume_in_background(
                         ca_record_id=ca_record.id,
                         resume_url=ca_record.resume_file_path,
                     )
@@ -318,6 +327,9 @@ class CandidateService:
             )
         else:
             candidate = existing_candidate
+            if name and candidate.full_name != name:
+                candidate.full_name = name
+                await self._candidate_repo.update_candidate(candidate)
 
         existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
             candidate.id, matched_assessment.id
@@ -344,7 +356,7 @@ class CandidateService:
             f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
         )
         asyncio.create_task(
-            _dispatch_invitation_with_logging(
+            self.dispatch_invitation_with_logging(
                 ca_record_id=ca_record.id,
                 candidate_name=name,
                 recipient_email=email,
@@ -357,7 +369,7 @@ class CandidateService:
 
         # Dispatch background parsing
         asyncio.create_task(
-            process_local_candidate_resume_in_background(
+            self.process_candidate_resume_in_background(
                 ca_record_id=ca_record.id,
                 temp_file_path=temp_file_path,
             )
@@ -365,382 +377,110 @@ class CandidateService:
 
         return ca_record
 
+    async def get_all_candidates_for_recruiter(
+        self, recruiter_id: uuid.UUID
+    ) -> list[CandidateAssessment]:
+        """Return all candidate-assessments for all assessments owned by the recruiter."""
+        return await self._ca_repo.get_all_by_recruiter(recruiter_id)
 
-def get_direct_download_url(url: str) -> str:
-    """If the URL is a Google Drive share link, return a direct download URL."""
-    import re
+    async def update_recruiter_decision(
+        self,
+        ca_id: uuid.UUID,
+        recruiter_id: uuid.UUID,
+        decision: str,
+        feedback: str | None = None,
+    ) -> CandidateAssessment:
+        """Validate ownership and persist the recruiter decision."""
+        ca = await self._ca_repo.get_by_id(ca_id)
+        if ca is None:
+            raise NotFoundException("Candidate registration not found.")
 
-    gd_match = re.search(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)", url)
-    if gd_match:
-        file_id = gd_match.group(1)
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
+        if ca.assessment.recruiter_id != recruiter_id:
+            raise ForbiddenException(
+                "You do not have permission to update this candidate."
+            )
 
-    gd_match_query = re.search(r"drive\.google\.com/.*id=([a-zA-Z0-9_-]+)", url)
-    if gd_match_query:
-        file_id = gd_match_query.group(1)
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-
-    return url
-
-
-async def run_resume_analysis(resume_text: str, groq_client: object) -> dict:
-    """Call Groq to extract structured fields from resume markdown text."""
-    import json
-
-    system_prompt = (
-        "You are an expert resume parser and technical recruiter. "
-        "Analyze the provided resume markdown text and extract structured candidate data.\n\n"
-        "You MUST respond with a JSON object that strictly adheres to the following schema:\n"
-        "{\n"
-        '  "summary": "string (a concise 2-3 sentence technical summary of the candidate\'s background and strengths)",\n'
-        '  "skills": ["string (key technical skills/tools/languages the candidate has experience with)"],\n'
-        '  "experience_years": float (estimated total years of professional/technical work experience based on the resume timeline. Be realistic. If it is not clear, provide a best estimate)\n'
-        "}\n"
-        "Only return raw JSON. Do not include markdown code block formatting (such as ```json) or explanation."
-    )
-
-    completion = await groq_client.chat.completions.create(
-        model=settings.GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"Analyze this Candidate Resume:\n{resume_text}",
-            },
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-    raw_content = completion.choices[0].message.content or ""
-    return json.loads(raw_content)
-
-
-async def process_candidate_resume_in_background(
-    ca_record_id: uuid.UUID,
-    resume_url: str,
-) -> None:
-    """Download candidate resume, parse using LlamaParse, extract structured data via Groq, and update CandidateAssessment."""
-    import os
-
-    import httpx
-    from fastapi.concurrency import run_in_threadpool
-    from groq import AsyncGroq
-    from llama_parse import LlamaParse
-    from sqlalchemy import select
-
-    from src.data.clients.postgres_client import get_session_factory
-
-    logger.info(
-        "Starting background resume parsing for ca_record=%s from url=%s",
-        ca_record_id,
-        resume_url,
-    )
-
-    # 1. Setup local temporary storage path
-    os.makedirs("temp_resumes", exist_ok=True)
-    temp_file_path = f"temp_resumes/{ca_record_id}.pdf"
-
-    SessionLocal = await get_session_factory()
-
-    try:
-        # Check if the URL is a dummy placeholder or invalid
-        if not resume_url.startswith("http"):
-            raise ValueError(f"Invalid resume URL (not HTTP/HTTPS): {resume_url}")
-
-        # 2. Download the file
-        download_url = get_direct_download_url(resume_url)
-        logger.info(
-            "Downloading resume from %s to local file %s", download_url, temp_file_path
+        return await self._ca_repo.update_recruiter_decision(
+            ca,
+            decision=decision,
+            feedback=feedback,
         )
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            response = await client.get(download_url, timeout=30.0)
-            response.raise_for_status()
-            with open(temp_file_path, "wb") as f:
-                f.write(response.content)
+    async def delete_candidate_from_assessment(
+        self, ca_id: uuid.UUID, recruiter_id: uuid.UUID
+    ) -> None:
+        """Validate recruiter ownership and delete the candidate assessment from database."""
+        ca = await self._ca_repo.get_by_id(ca_id)
+        if ca is None:
+            raise NotFoundException("Candidate registration not found.")
 
-        # 3. Parse with LlamaParse
-        api_key = settings.LLAMA_CLOUD_API_KEY
-        if not api_key:
-            raise ValueError("LLAMA_CLOUD_API_KEY is not configured in settings")
+        if ca.assessment.recruiter_id != recruiter_id:
+            raise ForbiddenException(
+                "You do not have permission to delete this candidate."
+            )
 
-        parser = LlamaParse(api_key=api_key, result_type="markdown")
-        extra_info = {"file_name": f"{ca_record_id}.pdf"}
+        await self._ca_repo.delete(ca)
 
-        logger.info("Parsing resume using LlamaParse for ca_record=%s", ca_record_id)
-        documents = await asyncio.wait_for(
-            run_in_threadpool(parser.load_data, temp_file_path, extra_info=extra_info),
-            timeout=60,
-        )
-        resume_text = "\n".join(doc.text for doc in documents)
-
-        if not resume_text.strip():
-            raise ValueError("Parsed resume text is empty")
-
-        # 4. Analyze via Groq
-        logger.info(
-            "Analyzing parsed resume text via Groq for ca_record=%s", ca_record_id
-        )
-        groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        resume_parsed = await run_resume_analysis(resume_text, groq_client)
-
-        # 5. Save to database
-        async with SessionLocal() as db_session:
-            # Retry fetching up to 5 times to wait for the CSV upload transaction to commit
-            ca_record = None
-            for _attempt in range(5):
-                statement = select(CandidateAssessment).where(
-                    CandidateAssessment.id == ca_record_id
-                )
-                result = await db_session.execute(statement)
-                ca_record = result.scalar_one_or_none()
-                if ca_record:
-                    break
-                await asyncio.sleep(0.5)
-
-            if ca_record:
-                ca_record.resume_parsed = resume_parsed
-                ca_record.resume_parse_status = "COMPLETED"
-                await db_session.commit()
-                logger.info(
-                    "Resume parsed and saved successfully in DB for ca_record=%s",
-                    ca_record_id,
-                )
-            else:
-                logger.error(
-                    "CandidateAssessment %s not found in database to update parsing results",
-                    ca_record_id,
-                )
-
-    except Exception as exc:
-        logger.exception(
-            "Failed to parse and save resume for ca_record %s", ca_record_id
-        )
-
-        # Mark as FAILED in database
+    async def process_candidate_resume_in_background(
+        self, ca_record_id, resume_url=None, temp_file_path=None
+    ):
         try:
-            async with SessionLocal() as db_session:
-                ca_record = None
-                for _attempt in range(5):
-                    statement = select(CandidateAssessment).where(
-                        CandidateAssessment.id == ca_record_id
-                    )
-                    result = await db_session.execute(statement)
-                    ca_record = result.scalar_one_or_none()
-                    if ca_record:
-                        break
-                    await asyncio.sleep(0.5)
+            if resume_url:
+                os.makedirs("temp_resumes", exist_ok=True)
+                temp_file_path = f"temp_resumes/{ca_record_id}.pdf"
+                await download_resume(resume_url, temp_file_path)
 
-                if ca_record:
-                    ca_record.resume_parse_status = "FAILED"
-                    ca_record.resume_parsed = {
-                        "error": str(exc),
-                        "summary": "Failed to parse resume.",
-                        "skills": [],
-                        "experience_years": 0,
-                    }
-                    await db_session.commit()
-                    logger.info(
-                        "Marked resume parse as FAILED in DB for ca_record=%s",
-                        ca_record_id,
-                    )
-        except Exception:
-            logger.exception(
-                "Failed to update resume_parse_status to FAILED for ca_record %s",
-                ca_record_id,
-            )
-
-    finally:
-        # 6. Delete local copy of the downloaded resume
-        if os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-                logger.info("Deleted local resume file: %s", temp_file_path)
-            except Exception:
-                logger.exception(
-                    "Failed to delete local resume file: %s", temp_file_path
-                )
-
-
-async def process_local_candidate_resume_in_background(
-    ca_record_id: uuid.UUID,
-    temp_file_path: str,
-) -> None:
-    """Parse local candidate resume using LlamaParse, extract structured data via Groq, and update CandidateAssessment."""
-    import asyncio
-    import os
-
-    from fastapi.concurrency import run_in_threadpool
-    from groq import AsyncGroq
-    from llama_parse import LlamaParse
-    from sqlalchemy import select
-
-    from src.data.clients.postgres_client import get_session_factory
-
-    logger.info(
-        "Starting background resume parsing for ca_record=%s from local file=%s",
-        ca_record_id,
-        temp_file_path,
-    )
-
-    SessionLocal = await get_session_factory()
-
-    try:
-        # 1. Parse with LlamaParse
-        api_key = settings.LLAMA_CLOUD_API_KEY
-        if not api_key:
-            raise ValueError("LLAMA_CLOUD_API_KEY is not configured in settings")
-
-        parser = LlamaParse(api_key=api_key, result_type="markdown")
-        extra_info = {"file_name": f"{ca_record_id}.pdf"}
-
-        logger.info("Parsing resume using LlamaParse for ca_record=%s", ca_record_id)
-        documents = await asyncio.wait_for(
-            run_in_threadpool(parser.load_data, temp_file_path, extra_info=extra_info),
-            timeout=60,
-        )
-        resume_text = "\n".join(doc.text for doc in documents)
-
-        if not resume_text.strip():
-            raise ValueError("Parsed resume text is empty")
-
-        # 2. Analyze via Groq
-        logger.info(
-            "Analyzing parsed resume text via Groq for ca_record=%s", ca_record_id
-        )
-        groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-        resume_parsed = await run_resume_analysis(resume_text, groq_client)
-
-        # 3. Save to database
-        async with SessionLocal() as db_session:
-            ca_record = None
-            for _attempt in range(5):
-                statement = select(CandidateAssessment).where(
-                    CandidateAssessment.id == ca_record_id
-                )
-                result = await db_session.execute(statement)
-                ca_record = result.scalar_one_or_none()
-                if ca_record:
-                    break
-                await asyncio.sleep(0.5)
-
-            if ca_record:
-                ca_record.resume_parsed = resume_parsed
-                ca_record.resume_parse_status = "COMPLETED"
-                await db_session.commit()
-                logger.info(
-                    "Resume parsed and saved successfully in DB for ca_record=%s",
+            if not temp_file_path:
+                logger.warning(
+                    "No resume_url or temp_file_path provided for ca_record_id %s",
                     ca_record_id,
                 )
-            else:
-                logger.error(
-                    "CandidateAssessment %s not found in database to update parsing results",
-                    ca_record_id,
-                )
+                return
 
-    except Exception as exc:
-        logger.exception(
-            "Failed to parse and save resume for ca_record %s", ca_record_id
-        )
+            resume_parsed = await parse_resume_from_file(temp_file_path)
 
-        try:
-            async with SessionLocal() as db_session:
-                ca_record = None
-                for _attempt in range(5):
-                    statement = select(CandidateAssessment).where(
-                        CandidateAssessment.id == ca_record_id
-                    )
-                    result = await db_session.execute(statement)
-                    ca_record = result.scalar_one_or_none()
-                    if ca_record:
-                        break
-                    await asyncio.sleep(0.5)
+            await self._ca_repo.save_parsed_resume_success(ca_record_id, resume_parsed)
 
-                if ca_record:
-                    ca_record.resume_parse_status = "FAILED"
-                    ca_record.resume_parsed = {
-                        "error": str(exc),
-                        "summary": "Failed to parse resume.",
-                        "skills": [],
-                        "experience_years": 0,
-                    }
-                    await db_session.commit()
-                    logger.info(
-                        "Marked resume parse as FAILED in DB for ca_record=%s",
-                        ca_record_id,
-                    )
-        except Exception:
-            logger.exception(
-                "Failed to update resume_parse_status to FAILED for ca_record %s",
-                ca_record_id,
-            )
-
-    finally:
-        # 4. Delete local copy of the downloaded resume
-        if os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-                logger.info("Deleted local resume file: %s", temp_file_path)
-            except Exception:
-                logger.exception(
-                    "Failed to delete local resume file: %s", temp_file_path
-                )
-
-
-async def _dispatch_invitation_with_logging(
-    ca_record_id: uuid.UUID,
-    candidate_name: str,
-    recipient_email: str,
-    assessment_title: str,
-    role_name: str,
-    invitation_link: str,
-    interview_duration_mins: int,
-) -> None:
-    """Send invitation email and create a notification log entry (best-effort)."""
-    from src.data.clients.postgres_client import get_session_factory
-
-    SessionLocal = await get_session_factory()
-    async with SessionLocal() as session:
-        notif_repo = NotificationLogRepository(session)
-        try:
-            await _send_invitation_email(
-                candidate_name=candidate_name,
-                recipient_email=recipient_email,
-                assessment_title=assessment_title,
-                role_name=role_name,
-                invitation_link=invitation_link,
-                interview_duration_mins=interview_duration_mins,
-            )
-            await notif_repo.create(
-                candidate_assessment_id=ca_record_id,
-                notification_type="INVITATION",
-                recipient_email=recipient_email,
-                delivery_status="SENT",
-            )
-            await session.commit()
-            logger.info(
-                "Invitation email sent and logged",
-                extra={"candidate_assessment_id": str(ca_record_id)},
-            )
         except Exception as exc:
-            logger.exception(
-                "Failed to send invitation email for candidate_assessment %s — %s: %s",
-                ca_record_id,
-                type(exc).__name__,
-                exc,
-            )
+            logger.exception("Failed to parse resume for ca_record %s", ca_record_id)
             try:
-                await notif_repo.create(
-                    candidate_assessment_id=ca_record_id,
-                    notification_type="INVITATION",
-                    recipient_email=recipient_email,
-                    delivery_status="FAILED",
-                    error_message=f"{type(exc).__name__}: {exc}",
-                )
-                await session.commit()
-            except Exception as log_exc:
-                logger.exception(
-                    "Failed to log failed notification for candidate_assessment %s — %s",
+                await self._ca_repo.save_parsed_resume_failed(ca_record_id, str(exc))
+            except Exception:
+                pass
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except Exception:
+                    pass
+
+    async def dispatch_invitation_with_logging(
+        self,
+        ca_record_id,
+        candidate_name,
+        recipient_email,
+        assessment_title,
+        role_name,
+        invitation_link,
+        interview_duration_mins,
+    ):
+        notif_repo = NotificationLogRepository(self._ca_repo._session)
+        try:
+            await send_invitation_email(
+                candidate_name,
+                recipient_email,
+                assessment_title,
+                role_name,
+                invitation_link,
+                interview_duration_mins,
+            )
+            await notif_repo.log_invitation_sent(ca_record_id, recipient_email)
+        except Exception as exc:
+            try:
+                await notif_repo.log_invitation_failed(
                     ca_record_id,
-                    log_exc,
+                    recipient_email,
+                    f"{type(exc).__name__}: {exc}",
                 )
+            except Exception:
+                pass

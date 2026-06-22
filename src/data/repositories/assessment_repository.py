@@ -40,3 +40,33 @@ class AssessmentRepository:
         await self._session.refresh(assessment)
         logger.info("Assessment created", extra={"assessment_id": str(assessment.id)})
         return assessment
+
+    async def activate_assessment(
+        self,
+        assessment_id: uuid.UUID,
+        jd_text: str,
+        jd_analysis: dict,
+        interview_plan: dict,
+    ) -> None:
+        assessment = await self.get_by_id(assessment_id)
+        if assessment:
+            assessment.jd_text = jd_text
+            assessment.jd_analysis = jd_analysis
+            assessment.interview_plan = interview_plan
+            assessment.status = "ACTIVE"
+            await self._session.flush()
+            logger.info("Assessment %s activated with commit.", assessment_id)
+
+    async def close_assessment_on_failure(self, assessment_id: uuid.UUID) -> None:
+        assessment = await self.get_by_id(assessment_id)
+        if assessment:
+            assessment.status = "CLOSED"
+            await self._session.flush()
+            logger.info("Assessment %s closed on failure with commit.", assessment_id)
+
+    async def update_status(self, assessment: Assessment, status: str) -> Assessment:
+        """Update and persist the assessment status."""
+        assessment.status = status
+        await self._session.flush()
+        await self._session.refresh(assessment)
+        return assessment

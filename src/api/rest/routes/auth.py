@@ -112,7 +112,7 @@ async def refresh_token(
 )
 async def get_current_recruiter(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    session: AsyncSession = Depends(get_db_session),
+    service: AuthService = Depends(get_auth_service),
 ) -> APIResponse[RecruiterResponse]:
     """Return the recruiter profile for the authenticated session."""
 
@@ -126,7 +126,6 @@ async def get_current_recruiter(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    service = AuthService(AuthRepository(session))
     recruiter = await service._repository.get_recruiter_by_id(recruiter_id)
     if recruiter is None:
         raise NotFoundException("Recruiter not found.")
