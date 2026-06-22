@@ -70,3 +70,33 @@ class AssessmentRepository:
         await self._session.flush()
         await self._session.refresh(assessment)
         return assessment
+
+    @classmethod
+    async def activate_assessment_in_background(
+        cls,
+        assessment_id: uuid.UUID,
+        jd_text: str,
+        jd_analysis: dict,
+        interview_plan: dict,
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.activate_assessment(
+                assessment_id, jd_text, jd_analysis, interview_plan
+            )
+            await session.commit()
+
+    @classmethod
+    async def close_assessment_on_failure_in_background(
+        cls, assessment_id: uuid.UUID
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.close_assessment_on_failure(assessment_id)
+            await session.commit()

@@ -192,3 +192,54 @@ class CandidateAssessmentRepository:
 
         await self._session.delete(ca)
         await self._session.flush()
+
+    @classmethod
+    async def save_parsed_resume_success_in_background(
+        cls, ca_record_id: uuid.UUID, parsed_data: dict
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.save_parsed_resume_success(ca_record_id, parsed_data)
+            await session.commit()
+
+    @classmethod
+    async def save_parsed_resume_failed_in_background(
+        cls, ca_record_id: uuid.UUID, error_msg: str
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.save_parsed_resume_failed(ca_record_id, error_msg)
+            await session.commit()
+
+    @classmethod
+    async def get_candidate_emails_for_assessment_in_background(
+        cls, assessment_id: uuid.UUID
+    ) -> list[dict]:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            ca_records = await repo.get_all_by_assessment(assessment_id)
+            results = []
+            for ca in ca_records:
+                if ca.candidate and ca.candidate.email:
+                    results.append(
+                        {
+                            "candidate_name": ca.candidate.full_name,
+                            "recipient_email": ca.candidate.email,
+                            "assessment_title": ca.assessment.title
+                            if ca.assessment
+                            else "",
+                            "role_name": ca.assessment.role_name
+                            if ca.assessment
+                            else "",
+                        }
+                    )
+            return results

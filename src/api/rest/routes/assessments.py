@@ -19,10 +19,7 @@ from src.core.exceptions import (
     AuthenticationException,
     BadRequestException,
 )
-from src.core.services.assessment_service import (
-    AssessmentService,
-    process_assessment_in_background,
-)
+from src.core.services.assessment_service import AssessmentService
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import (
     AssessmentCreateForm,
@@ -89,7 +86,7 @@ async def create_assessment(
 
     # Queue the heavy parsing & analysis as a background task
     background_tasks.add_task(
-        process_assessment_in_background,
+        service.process_assessment_in_background,
         assessment.id,
         form_data.jd_text,
         file_bytes,

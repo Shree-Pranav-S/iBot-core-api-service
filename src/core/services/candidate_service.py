@@ -424,6 +424,10 @@ class CandidateService:
     async def process_candidate_resume_in_background(
         self, ca_record_id, resume_url=None, temp_file_path=None
     ):
+        from src.data.repositories.candidate_assessment_repository import (
+            CandidateAssessmentRepository,
+        )
+
         try:
             if resume_url:
                 os.makedirs("temp_resumes", exist_ok=True)
@@ -439,12 +443,18 @@ class CandidateService:
 
             resume_parsed = await parse_resume_from_file(temp_file_path)
 
-            await self._ca_repo.save_parsed_resume_success(ca_record_id, resume_parsed)
+            await (
+                CandidateAssessmentRepository.save_parsed_resume_success_in_background(
+                    ca_record_id, resume_parsed
+                )
+            )
 
         except Exception as exc:
             logger.exception("Failed to parse resume for ca_record %s", ca_record_id)
             try:
-                await self._ca_repo.save_parsed_resume_failed(ca_record_id, str(exc))
+                await CandidateAssessmentRepository.save_parsed_resume_failed_in_background(
+                    ca_record_id, str(exc)
+                )
             except Exception:
                 pass
         finally:
@@ -464,7 +474,6 @@ class CandidateService:
         invitation_link,
         interview_duration_mins,
     ):
-        notif_repo = NotificationLogRepository(self._ca_repo._session)
         try:
             await send_invitation_email(
                 candidate_name,
@@ -474,10 +483,12 @@ class CandidateService:
                 invitation_link,
                 interview_duration_mins,
             )
-            await notif_repo.log_invitation_sent(ca_record_id, recipient_email)
+            await NotificationLogRepository.log_invitation_sent_in_background(
+                ca_record_id, recipient_email
+            )
         except Exception as exc:
             try:
-                await notif_repo.log_invitation_failed(
+                await NotificationLogRepository.log_invitation_failed_in_background(
                     ca_record_id,
                     recipient_email,
                     f"{type(exc).__name__}: {exc}",

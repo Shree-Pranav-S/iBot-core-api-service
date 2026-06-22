@@ -15,7 +15,7 @@ class EvaluationSkillBreakdown(AppBaseModel):
     priority_score: float | None = None
     weighted_score: float
     raw_score: float | None = None
-    difficulty_reached: float | None = None
+    difficulty_reached: str | float | None = None
     signals_demonstrated: list[str] = []
     signals_missing: list[str] = []
     summary: str
@@ -24,7 +24,7 @@ class EvaluationSkillBreakdown(AppBaseModel):
 class EvaluationSectionSummary(AppBaseModel):
     summary: str
     avg_score: float
-    difficulty_reached: float | None = None
+    difficulty_reached: str | float | None = None
     questions_asked: int | None = None
 
 
@@ -62,12 +62,6 @@ class InterviewEvaluationResponse(AppBaseModel):
     technical_dimension_score: float
     score_evidence: list[str] = []
     score_summary: str = ""
-    problem_solving_score: float | None = None
-    problem_solving_evidence: list[str] = []
-    problem_solving_summary: str | None = None
-    communication_score: float | None = None
-    communication_evidence: list[str] = []
-    communication_summary: str | None = None
     behavioural_score: float
     behavioural_evidence: list[str]
     behavioural_summary: str
@@ -83,14 +77,12 @@ class InterviewEvaluationResponse(AppBaseModel):
     # Overall
     overall_score: float
     hiring_recommendation: str
-    recommendation_override_reason: str | None = None
     overall_narrative: str
     recommendation_reasoning: str
 
     # Highlights & Flags
     strengths: list[str]
     concerns: list[str]
-    red_flags: list[RedFlag] = []
     violation_summary: ViolationSummary | None
     best_answer: HighlightAnswer | None
     weakest_answer: HighlightAnswer | None
