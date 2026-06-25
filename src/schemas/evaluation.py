@@ -11,11 +11,27 @@ from typing import Any
 from src.schemas.base import AppBaseModel
 
 
+class TranscriptEvidence(AppBaseModel):
+    turn_number: int | None = None
+    section: str | None = None
+    skill: str | None = None
+    quote: str
+    interpretation: str
+
+
 class EvaluationSkillBreakdown(AppBaseModel):
     priority_score: float | None = None
+    depth_required: str | None = None
     weighted_score: float
     raw_score: float | None = None
+    weight_share: float | None = None
+    weighted_contribution: float | None = None
     difficulty_reached: str | float | None = None
+    questions_asked: int | None = None
+    assessed: bool | None = None
+    similar_skill_credit: bool = False
+    similar_skills_considered: list[str] = []
+    transcript_evidence: list[TranscriptEvidence] = []
     signals_demonstrated: list[str] = []
     signals_missing: list[str] = []
     summary: str
@@ -23,9 +39,10 @@ class EvaluationSkillBreakdown(AppBaseModel):
 
 class EvaluationSectionSummary(AppBaseModel):
     summary: str
-    avg_score: float
+    avg_score: float | None = None
     difficulty_reached: str | float | None = None
     questions_asked: int | None = None
+    evidence: list[TranscriptEvidence] = []
 
 
 class HighlightAnswer(AppBaseModel):
@@ -54,9 +71,15 @@ class InterviewEvaluationResponse(AppBaseModel):
     id: uuid.UUID
     candidate_assessment_id: uuid.UUID
     session_id: uuid.UUID
+    candidate_name: str | None = None
+    candidate_email: str | None = None
+    assessment_title: str | None = None
+    role_name: str | None = None
+    recruiter_decision: str | None = None
+    recruiter_feedback: str | None = None
 
     # Skills
-    skill_scores: dict[str, Any]
+    skill_scores: dict[str, EvaluationSkillBreakdown]
 
     # Dimensions
     technical_dimension_score: float
@@ -123,4 +146,4 @@ class RecruiterEvaluationListItem(AppBaseModel):
     strengths: list[str]
     concerns: list[str]
     red_flags_count: int
-    skill_scores: dict[str, Any]
+    skill_scores: dict[str, EvaluationSkillBreakdown]

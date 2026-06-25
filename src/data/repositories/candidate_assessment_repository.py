@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from src.data.clients.postgres_client import register_after_commit_callback
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 
 logger = logging.getLogger(__name__)
@@ -103,6 +105,10 @@ class CandidateAssessmentRepository:
             },
         )
         return ca
+
+    def register_after_commit_callback(self, callback: Callable[[], None]) -> None:
+        """Register work that must run after the current transaction commits."""
+        register_after_commit_callback(self._session, callback)
 
     async def update_resume_parsing_result(
         self, ca_id: uuid.UUID, status: str, parsed_data: dict

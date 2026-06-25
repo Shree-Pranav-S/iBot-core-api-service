@@ -23,11 +23,12 @@ from src.data.repositories.csv_upload_log_repository import CSVUploadLogReposito
 from src.data.repositories.notification_log_repository import (
     NotificationLogRepository,
 )
+from src.handlers.celery_tasks.notification_tasks import enqueue_invitation_email
 from src.schemas.candidate import BulkUploadResponse, CSVRowResult
 from src.utils.candidates import (
     download_resume,
     parse_resume_from_file,
-    send_invitation_email,
+    send_hiring_decision_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,7 +257,7 @@ class CandidateService:
                 overall_status=overall_status,
             )
 
-        #  Dispatch invitation emails as background tasks
+        # Queue post-commit work so workers only see durable candidate rows.
         for (
             ca_record,
             assessment,
@@ -266,26 +267,41 @@ class CandidateService:
             invitation_link = (
                 f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
             )
-            # Fire-and-forget email: log but don't fail the upload on email error
-            asyncio.create_task(
-                self.dispatch_invitation_with_logging(
-                    ca_record_id=ca_record.id,
-                    candidate_name=candidate_name,
-                    recipient_email=recipient_email,
-                    assessment_title=assessment.title,
-                    role_name=assessment.role_name,
-                    invitation_link=invitation_link,
-                    interview_duration_mins=assessment.interview_duration_mins,
+
+            def _trigger_email(
+                c_id: uuid.UUID = ca_record.id,
+                c_name: str = candidate_name,
+                c_email: str = recipient_email,
+                a_title: str = assessment.title,
+                a_role: str = assessment.role_name,
+                a_link: str = invitation_link,
+                a_dur: int = assessment.interview_duration_mins,
+            ) -> None:
+                enqueue_invitation_email(
+                    ca_record_id=c_id,
+                    candidate_name=c_name,
+                    recipient_email=c_email,
+                    assessment_title=a_title,
+                    role_name=a_role,
+                    invitation_link=a_link,
+                    interview_duration_mins=a_dur,
                 )
-            )
-            # Fire-and-forget resume download and parsing
+
+            self._ca_repo.register_after_commit_callback(_trigger_email)
             if ca_record.resume_file_path:
-                asyncio.create_task(
-                    self.process_candidate_resume_in_background(
-                        ca_record_id=ca_record.id,
-                        resume_url=ca_record.resume_file_path,
+
+                def _trigger_resume(
+                    c_id: uuid.UUID = ca_record.id,
+                    r_url: str = str(ca_record.resume_file_path),
+                ) -> None:
+                    asyncio.create_task(
+                        self.process_candidate_resume_in_background(
+                            ca_record_id=c_id,
+                            resume_url=r_url,
+                        )
                     )
-                )
+
+                self._ca_repo.register_after_commit_callback(_trigger_resume)
 
         return BulkUploadResponse(
             upload_id=upload_log.id if upload_log else uuid.uuid4(),
@@ -351,12 +367,12 @@ class CandidateService:
         with open(temp_file_path, "wb") as f:
             f.write(resume_file_bytes)
 
-        # Dispatch email
         invitation_link = (
             f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
         )
-        asyncio.create_task(
-            self.dispatch_invitation_with_logging(
+
+        def _trigger_single_email() -> None:
+            enqueue_invitation_email(
                 ca_record_id=ca_record.id,
                 candidate_name=name,
                 recipient_email=email,
@@ -365,15 +381,18 @@ class CandidateService:
                 invitation_link=invitation_link,
                 interview_duration_mins=matched_assessment.interview_duration_mins,
             )
-        )
 
-        # Dispatch background parsing
-        asyncio.create_task(
-            self.process_candidate_resume_in_background(
-                ca_record_id=ca_record.id,
-                temp_file_path=temp_file_path,
+        self._ca_repo.register_after_commit_callback(_trigger_single_email)
+
+        def _trigger_single_resume() -> None:
+            asyncio.create_task(
+                self.process_candidate_resume_in_background(
+                    ca_record_id=ca_record.id,
+                    temp_file_path=temp_file_path,
+                )
             )
-        )
+
+        self._ca_repo.register_after_commit_callback(_trigger_single_resume)
 
         return ca_record
 
@@ -400,11 +419,31 @@ class CandidateService:
                 "You do not have permission to update this candidate."
             )
 
-        return await self._ca_repo.update_recruiter_decision(
+        previous_decision = ca.recruiter_decision
+        candidate_name = ca.candidate.full_name if ca.candidate else ""
+        recipient_email = ca.candidate.email if ca.candidate else ""
+        assessment_title = ca.assessment.title if ca.assessment else ""
+        role_name = ca.assessment.role_name if ca.assessment else ""
+        updated = await self._ca_repo.update_recruiter_decision(
             ca,
             decision=decision,
             feedback=feedback,
         )
+
+        if previous_decision != decision and recipient_email:
+            asyncio.create_task(
+                self.dispatch_decision_with_logging(
+                    ca_record_id=updated.id,
+                    candidate_name=candidate_name,
+                    recipient_email=recipient_email,
+                    assessment_title=assessment_title,
+                    role_name=role_name,
+                    decision=decision,
+                    feedback=feedback,
+                )
+            )
+
+        return updated
 
     async def delete_candidate_from_assessment(
         self, ca_id: uuid.UUID, recruiter_id: uuid.UUID
@@ -464,33 +503,41 @@ class CandidateService:
                 except Exception:
                     pass
 
-    async def dispatch_invitation_with_logging(
+    async def dispatch_decision_with_logging(
         self,
         ca_record_id,
         candidate_name,
         recipient_email,
         assessment_title,
         role_name,
-        invitation_link,
-        interview_duration_mins,
+        decision,
+        feedback=None,
     ):
+        notification_type = "APPROVAL" if decision == "APPROVED" else "REJECTION"
         try:
-            await send_invitation_email(
-                candidate_name,
-                recipient_email,
-                assessment_title,
-                role_name,
-                invitation_link,
-                interview_duration_mins,
+            await send_hiring_decision_email(
+                candidate_name=candidate_name,
+                recipient_email=recipient_email,
+                assessment_title=assessment_title,
+                role_name=role_name,
+                decision=decision,
+                feedback=feedback,
             )
-            await NotificationLogRepository.log_invitation_sent_in_background(
-                ca_record_id, recipient_email
+            await NotificationLogRepository.log_decision_sent_in_background(
+                ca_record_id,
+                recipient_email,
+                notification_type,
             )
         except Exception as exc:
+            logger.exception(
+                "Failed to dispatch hiring decision email for candidate %s",
+                ca_record_id,
+            )
             try:
-                await NotificationLogRepository.log_invitation_failed_in_background(
+                await NotificationLogRepository.log_decision_failed_in_background(
                     ca_record_id,
                     recipient_email,
+                    notification_type,
                     f"{type(exc).__name__}: {exc}",
                 )
             except Exception:

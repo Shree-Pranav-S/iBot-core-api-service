@@ -1,5 +1,5 @@
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -12,6 +12,22 @@ from src.config.settings import settings
 
 _engine: AsyncEngine | None = None
 logger = logging.getLogger(__name__)
+AfterCommitCallback = Callable[[], None]
+_AFTER_COMMIT_CALLBACKS_KEY = "after_commit_callbacks"
+
+
+def register_after_commit_callback(
+    session: AsyncSession,
+    callback: AfterCommitCallback,
+) -> None:
+    """Register a callback to run only after the request transaction commits."""
+    callbacks = session.info.setdefault(_AFTER_COMMIT_CALLBACKS_KEY, [])
+    callbacks.append(callback)
+
+
+def _pop_after_commit_callbacks(session: AsyncSession) -> list[AfterCommitCallback]:
+    callbacks = session.info.pop(_AFTER_COMMIT_CALLBACKS_KEY, [])
+    return list(callbacks)
 
 
 async def get_or_create_engine() -> AsyncEngine:
@@ -54,15 +70,20 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     logger.info("Entering get_db_session")
     SessionLocal = await get_session_factory()
     async with SessionLocal() as session:
+        after_commit_callbacks: list[AfterCommitCallback] = []
         try:
             logger.info("Yielding DB session")
             yield session
+            after_commit_callbacks = _pop_after_commit_callbacks(session)
             await session.commit()
             logger.info("DB session committed")
         except Exception:
             logger.exception("DB session rollback due to exception")
             await session.rollback()
             raise
+        else:
+            for callback in after_commit_callbacks:
+                callback()
         finally:
             logger.info("Exiting get_db_session")
 

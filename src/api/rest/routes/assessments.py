@@ -5,7 +5,6 @@ import uuid
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Header,
@@ -48,7 +47,6 @@ def get_assessment_service(
     description="Create an assessment by uploading a PDF JD or submitting raw text.",
 )
 async def create_assessment(
-    background_tasks: BackgroundTasks,
     form_data: AssessmentCreateForm = Depends(),
     jd_file: UploadFile | None = File(None),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
@@ -84,18 +82,8 @@ async def create_assessment(
         focus_areas=form_data.focus_areas,
     )
 
-    # Queue the heavy parsing & analysis as a background task
-    background_tasks.add_task(
-        service.process_assessment_in_background,
-        assessment.id,
-        form_data.jd_text,
-        file_bytes,
-        filename,
-        form_data.focus_areas,
-    )
-
     return APIResponse(
-        message="Assessment creation initiated successfully.",
+        message="Assessment creation queued successfully.",
         data=AssessmentResponse.model_validate(assessment),
     )
 

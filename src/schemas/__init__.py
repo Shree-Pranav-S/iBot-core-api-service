@@ -13,6 +13,7 @@ from src.schemas.assessment import (
     InterviewPlan,
     InterviewSection,
     JDAnalysis,
+    JDAnalysisAndInterviewPlan,
     SkillPriority,
 )
 from src.schemas.audit import AuditEventPayload, AuditLogResponse
@@ -62,6 +63,7 @@ __all__ = [
     "AssessmentSummaryResponse",
     "SkillPriority",
     "JDAnalysis",
+    "JDAnalysisAndInterviewPlan",
     "InterviewSection",
     "InterviewPlan",
     "FocusAreaOverride",

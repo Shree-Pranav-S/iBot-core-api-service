@@ -66,6 +66,36 @@ class NotificationLogRepository:
         )
         await self._session.flush()
 
+    async def log_decision_sent(
+        self,
+        ca_record_id,
+        recipient_email,
+        notification_type: str,
+    ):
+        await self.create(
+            candidate_assessment_id=ca_record_id,
+            notification_type=notification_type,
+            recipient_email=recipient_email,
+            delivery_status="SENT",
+        )
+        await self._session.flush()
+
+    async def log_decision_failed(
+        self,
+        ca_record_id,
+        recipient_email,
+        notification_type: str,
+        error_message,
+    ):
+        await self.create(
+            candidate_assessment_id=ca_record_id,
+            notification_type=notification_type,
+            recipient_email=recipient_email,
+            delivery_status="FAILED",
+            error_message=error_message,
+        )
+        await self._session.flush()
+
     @classmethod
     async def log_invitation_sent_in_background(
         cls, ca_record_id: uuid.UUID, recipient_email: str
@@ -89,5 +119,45 @@ class NotificationLogRepository:
             repo = cls(session)
             await repo.log_invitation_failed(
                 ca_record_id, recipient_email, error_message
+            )
+            await session.commit()
+
+    @classmethod
+    async def log_decision_sent_in_background(
+        cls,
+        ca_record_id: uuid.UUID,
+        recipient_email: str,
+        notification_type: str,
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.log_decision_sent(
+                ca_record_id,
+                recipient_email,
+                notification_type,
+            )
+            await session.commit()
+
+    @classmethod
+    async def log_decision_failed_in_background(
+        cls,
+        ca_record_id: uuid.UUID,
+        recipient_email: str,
+        notification_type: str,
+        error_message: str,
+    ) -> None:
+        from src.data.clients.postgres_client import get_session_factory
+
+        SessionLocal = await get_session_factory()
+        async with SessionLocal() as session:
+            repo = cls(session)
+            await repo.log_decision_failed(
+                ca_record_id,
+                recipient_email,
+                notification_type,
+                error_message,
             )
             await session.commit()

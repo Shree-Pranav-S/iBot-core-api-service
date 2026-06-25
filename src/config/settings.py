@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_PASSWORD: str | None = None
+    CELERY_BROKER_URL: str | None = None
+    CELERY_RESULT_BACKEND: str | None = None
 
     PGADMIN_DEFAULT_EMAIL: str = "admin@local.test"
     PGADMIN_DEFAULT_PASSWORD: str = "admin"
@@ -69,6 +71,14 @@ class Settings(BaseSettings):
     def REDIS_URL(self) -> str:
         password = f":{quote_plus(self.REDIS_PASSWORD)}@" if self.REDIS_PASSWORD else ""
         return f"redis://{password}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    @property
+    def celery_broker_url(self) -> str:
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+
+    @property
+    def celery_result_backend(self) -> str:
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
 
 @lru_cache(maxsize=1)

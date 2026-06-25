@@ -17,13 +17,33 @@ from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import FocusAreaOverride
 from src.utils.assessment_utils import (
-    generate_interview_plan,
     parse_pdf_jd,
-    run_jd_analysis,
+    run_jd_analysis_and_interview_plan,
 )
 from src.utils.candidates import send_cancellation_email
 
 logger = logging.getLogger(__name__)
+
+
+def _enqueue_assessment_processing_after_commit(
+    *,
+    assessment_id: uuid.UUID,
+    jd_text: str | None,
+    jd_file_bytes: bytes | None,
+    jd_filename: str | None,
+    focus_areas: list[FocusAreaOverride] | None,
+) -> None:
+    from src.handlers.celery_tasks.assessment_tasks import (
+        enqueue_assessment_processing,
+    )
+
+    enqueue_assessment_processing(
+        assessment_id=assessment_id,
+        jd_text=jd_text,
+        jd_file_bytes=jd_file_bytes,
+        jd_filename=jd_filename,
+        focus_areas=focus_areas,
+    )
 
 
 class AssessmentService:
@@ -86,7 +106,7 @@ class AssessmentService:
     ) -> Assessment:
         """
         Create a new assessment in PROCESSING status.
-        The heavy processing (PDF parsing, LLM analysis, plan generation) is offloaded to a background task.
+        The heavy processing is queued after the request transaction commits.
         """
         if not jd_file_bytes and not jd_text:
             raise BadRequestException(
@@ -111,7 +131,17 @@ class AssessmentService:
             status="PROCESSING",  # Default to PROCESSING for async flow
         )
 
-        return await self._repository.create_assessment(db_assessment)
+        assessment = await self._repository.create_assessment(db_assessment)
+        self._repository.register_after_commit_callback(
+            lambda: _enqueue_assessment_processing_after_commit(
+                assessment_id=assessment.id,
+                jd_text=jd_text,
+                jd_file_bytes=jd_file_bytes,
+                jd_filename=jd_filename,
+                focus_areas=focus_areas,
+            )
+        )
+        return assessment
 
     async def process_assessment_in_background(
         self,
@@ -139,14 +169,15 @@ class AssessmentService:
             if not parsed_jd_text.strip():
                 raise ValueError("Job description content is empty.")
 
-            # Run LLM analysis
-            jd_analysis = await run_jd_analysis(parsed_jd_text, self._groq_client)
-
-            # Generate Interview Plan
-            interview_plan = generate_interview_plan(
-                assessment.interview_duration_mins, jd_analysis.skills, focus_areas
+            # Run one LLM call that generates both JD analysis and the executable plan.
+            generated = await run_jd_analysis_and_interview_plan(
+                parsed_jd_text,
+                assessment.interview_duration_mins,
+                focus_areas,
+                self._groq_client,
             )
-
+            jd_analysis = generated.jd_analysis
+            interview_plan = generated.interview_plan
             # Delegate DB flush and commit to the repository classmethod
             from src.data.repositories.assessment_repository import AssessmentRepository
 
@@ -154,7 +185,7 @@ class AssessmentService:
                 assessment_id=assessment_id,
                 jd_text=parsed_jd_text,
                 jd_analysis=jd_analysis.model_dump(),
-                interview_plan=interview_plan.model_dump(),
+                interview_plan=interview_plan.model_dump(exclude_none=True),
             )
             logger.info(
                 "Successfully processed assessment %s asynchronously.", assessment_id

@@ -14,7 +14,7 @@ from pydantic import Field, ValidationError, model_validator
 from src.core.exceptions import BadRequestException
 from src.schemas.base import AppBaseModel, ORMBaseModel
 
-# ── Nested data structures ────────────────────────────────────────────────────
+# â”€â”€ Nested data structures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class SkillPriority(AppBaseModel):
@@ -22,7 +22,7 @@ class SkillPriority(AppBaseModel):
 
     skill: str = Field(..., description="Skill name, e.g. 'Python', 'System Design'")
     priority_score: float = Field(
-        ..., ge=1.0, le=10.0, description="LLM-inferred priority 1–10"
+        ..., ge=1.0, le=10.0, description="LLM-inferred priority 1â€“10"
     )
     depth_required: str = Field(
         ..., description="e.g. 'Expert', 'Intermediate', 'Awareness'"
@@ -58,6 +58,10 @@ class InterviewSection(AppBaseModel):
     )
     allocated_mins: float
     priority_score: float | None = None
+    expected_signals: list[str] = Field(
+        default_factory=list,
+        description="What the bot should listen for while assessing this section",
+    )
 
 
 class InterviewPlan(AppBaseModel):
@@ -70,6 +74,16 @@ class InterviewPlan(AppBaseModel):
     sections: list[InterviewSection]
 
 
+class JDAnalysisAndInterviewPlan(AppBaseModel):
+    """
+    Combined LLM output for assessment creation.
+    The API persists these as separate JSONB fields.
+    """
+
+    jd_analysis: JDAnalysis
+    interview_plan: InterviewPlan
+
+
 class FocusAreaOverride(AppBaseModel):
     """Recruiter-specified weight override for a single skill."""
 
@@ -77,11 +91,11 @@ class FocusAreaOverride(AppBaseModel):
     weight_override: float = Field(..., ge=0.0, le=10.0)
 
 
-# ── Request schemas ───────────────────────────────────────────────────────────
+# â”€â”€ Request schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class AssessmentCreateRequest(AppBaseModel):
-    """POST /assessments request body (multipart — jd_file handled separately)."""
+    """POST /assessments request body (multipart â€” jd_file handled separately)."""
 
     title: str = Field(..., min_length=2, max_length=200)
     role_name: str = Field(..., min_length=2, max_length=120)
@@ -89,7 +103,7 @@ class AssessmentCreateRequest(AppBaseModel):
     jd_text: str | None = Field(
         None, description="Raw JD text; omit if uploading a PDF"
     )
-    interview_duration_mins: int = Field(..., ge=5, le=180)
+    interview_duration_mins: int = Field(..., ge=2, le=180)
     window_start: datetime
     window_end: datetime
     focus_areas: list[FocusAreaOverride] | None = None
@@ -161,12 +175,12 @@ class AssessmentCreateForm:
 
 
 class AssessmentUpdateStatusRequest(AppBaseModel):
-    """PATCH /assessments/{id}/status — move DRAFT → ACTIVE or ACTIVE → CLOSED."""
+    """PATCH /assessments/{id}/status â€” move DRAFT â†’ ACTIVE or ACTIVE â†’ CLOSED."""
 
     status: str = Field(..., pattern="^(ACTIVE|CLOSED)$")
 
 
-# ── Response schemas ──────────────────────────────────────────────────────────
+# â”€â”€ Response schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 class AssessmentResponse(ORMBaseModel):

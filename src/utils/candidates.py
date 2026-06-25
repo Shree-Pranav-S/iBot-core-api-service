@@ -2,6 +2,7 @@
 
 import logging
 import re
+from html import escape
 
 import fitz
 import httpx
@@ -345,6 +346,130 @@ async def send_cancellation_email(
         extra={
             "recipient": recipient_email,
             "assessment_title": assessment_title,
+            "brevo_response": str(result),
+        },
+    )
+
+
+async def send_hiring_decision_email(
+    *,
+    candidate_name: str,
+    recipient_email: str,
+    assessment_title: str,
+    role_name: str,
+    decision: str,
+    feedback: str | None = None,
+) -> None:
+    """Send the recruiter's final hiring decision email via Brevo."""
+
+    normalized_decision = decision.upper()
+    safe_candidate_name = escape(candidate_name)
+    safe_assessment_title = escape(assessment_title)
+    safe_role_name = escape(role_name)
+    safe_feedback = escape(feedback.strip()) if feedback and feedback.strip() else None
+    is_approved = normalized_decision == "APPROVED"
+    accent = "#059669" if is_approved else "#dc2626"
+    soft_bg = "#ecfdf5" if is_approved else "#fef2f2"
+    border = "#a7f3d0" if is_approved else "#fecaca"
+    label = (
+        "Hiring Update - Shortlisted" if is_approved else "Hiring Update - Not Selected"
+    )
+    subject_status = "Shortlisted" if is_approved else "Application Update"
+    body = (
+        "Congratulations. After reviewing your AI interview evaluation, "
+        "the recruiting team has decided to move forward with your candidature."
+        if is_approved
+        else (
+            "Thank you for completing the AI interview. After reviewing your "
+            "evaluation, the recruiting team has decided not to move forward "
+            "with your candidature for this assessment."
+        )
+    )
+    next_step = (
+        "The team may contact you with next steps or additional coordination details."
+        if is_approved
+        else "We appreciate your time and encourage you to apply again for future roles that match your experience."
+    )
+    feedback_html = ""
+    if safe_feedback:
+        feedback_html = f"""
+                  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 18px;margin-top:22px;">
+                    <p style="margin:0 0 6px;color:#0f172a;font-size:13px;font-weight:700;">Recruiter feedback</p>
+                    <p style="margin:0;color:#475569;font-size:13px;line-height:1.6;">{safe_feedback}</p>
+                  </div>
+        """
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Hiring Decision</title>
+    </head>
+    <body style="margin:0;padding:0;background-color:#f4f6fa;font-family:'Segoe UI',Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 0;">
+        <tr>
+          <td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+              <tr>
+                <td style="background:{accent};padding:34px 40px;text-align:center;">
+                  <h1 style="margin:0;color:#ffffff;font-size:26px;font-weight:700;">iBot AI Interview</h1>
+                  <p style="margin:8px 0 0;color:rgba(255,255,255,0.86);font-size:14px;">Final hiring decision</p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:40px;">
+                  <p style="margin:0 0 8px;color:{accent};font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;">{label}</p>
+                  <h2 style="margin:0 0 20px;color:#0f172a;font-size:22px;font-weight:700;">Hello, {safe_candidate_name}</h2>
+                  <p style="margin:0 0 22px;color:#475569;font-size:15px;line-height:1.7;">{body}</p>
+                  <table width="100%" cellpadding="0" cellspacing="0" style="background:{soft_bg};border:1px solid {border};border-radius:12px;margin:0 0 22px;">
+                    <tr>
+                      <td style="padding:18px 22px;">
+                        <p style="margin:0;color:#64748b;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">Assessment</p>
+                        <p style="margin:6px 0 0;color:#0f172a;font-size:15px;font-weight:700;">{safe_assessment_title}</p>
+                        <p style="margin:6px 0 0;color:#475569;font-size:13px;">Role: {safe_role_name}</p>
+                      </td>
+                    </tr>
+                  </table>
+                  <p style="margin:0;color:#475569;font-size:14px;line-height:1.7;">{next_step}</p>
+                  {feedback_html}
+                </td>
+              </tr>
+              <tr>
+                <td style="background:#f8fafc;border-top:1px solid #f1f5f9;padding:22px 40px;text-align:center;">
+                  <p style="margin:0;color:#94a3b8;font-size:12px;">This message was sent by the iBot AI Interview Platform.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+    """
+
+    client = AsyncBrevo(api_key=settings.BREVO_API_KEY)
+    sender = SendTransacEmailRequestSender(
+        email=settings.BREVO_SENDER_EMAIL,
+        name="iBot AI Interview Platform",
+    )
+    recipient = SendTransacEmailRequestToItem(
+        email=recipient_email,
+        name=candidate_name,
+    )
+    result = await client.transactional_emails.send_transac_email(
+        html_content=html_content,
+        sender=sender,
+        subject=f"{subject_status}: {role_name} - {assessment_title}",
+        to=[recipient],
+    )
+    logger.info(
+        "Hiring decision email sent via Brevo",
+        extra={
+            "recipient": recipient_email,
+            "assessment_title": assessment_title,
+            "decision": normalized_decision,
             "brevo_response": str(result),
         },
     )

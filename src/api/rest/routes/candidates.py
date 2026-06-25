@@ -99,7 +99,7 @@ async def bulk_upload_candidates(
 
     return APIResponse(
         message=(
-            f"CSV processed: {result.successful_rows} candidate(s) invited, "
+            f"CSV processed: {result.successful_rows} candidate invitation(s) queued, "
             f"{result.failed_rows} failed."
         ),
         data=result,
@@ -146,7 +146,7 @@ async def create_single_candidate_manual(
     )
 
     return APIResponse(
-        message="Candidate created and invitation dispatched.",
+        message="Candidate created and invitation queued.",
         data=SingleCandidateResponse(
             candidate_assessment_id=ca_record.id,
             candidate_id=ca_record.candidate_id,
@@ -218,6 +218,10 @@ async def list_recruiter_evaluations(
 
     data: list[RecruiterEvaluationListItem] = []
     for evaluation, ca, candidate, assessment in rows:
+        violation_entries = []
+        if isinstance(evaluation.violation_summary, dict):
+            entries = evaluation.violation_summary.get("entries")
+            violation_entries = entries if isinstance(entries, list) else []
         data.append(
             RecruiterEvaluationListItem(
                 candidate_assessment_id=ca.id,
@@ -243,7 +247,7 @@ async def list_recruiter_evaluations(
                 total_candidates_evaluated=evaluation.total_candidates_evaluated,
                 strengths=evaluation.strengths,
                 concerns=evaluation.concerns,
-                red_flags_count=0,
+                red_flags_count=len(violation_entries),
                 skill_scores=evaluation.skill_scores,
             )
         )
@@ -283,7 +287,7 @@ async def update_recruiter_decision(
     )
 
     return APIResponse(
-        message="Recruiter decision updated successfully.",
+        message="Recruiter decision updated successfully. Candidate email queued.",
         data=RecruiterDecisionResponse(
             candidate_assessment_id=ca.id,
             recruiter_decision=ca.recruiter_decision,
@@ -331,11 +335,20 @@ async def get_candidate_evaluation(
 
         raise NotFoundException("Evaluation not found for this candidate.")
 
+    response = InterviewEvaluationResponse.model_validate(
+        evaluation,
+        from_attributes=True,
+    )
+    response.candidate_name = ca.candidate.full_name if ca.candidate else None
+    response.candidate_email = ca.candidate.email if ca.candidate else None
+    response.assessment_title = ca.assessment.title if ca.assessment else None
+    response.role_name = ca.assessment.role_name if ca.assessment else None
+    response.recruiter_decision = ca.recruiter_decision
+    response.recruiter_feedback = ca.recruiter_feedback
+
     return APIResponse(
         message="Evaluation retrieved successfully.",
-        data=InterviewEvaluationResponse.model_validate(
-            evaluation, from_attributes=True
-        ),
+        data=response,
     )
 
 
