@@ -53,6 +53,14 @@ NON_TECH_SECTION_KEYS = {
     "behavioural_cultural",
     "behavioral_cultural",
 }
+BEHAVIOURAL_CULTURAL_SECTION_KEYS = {
+    "behavioural",
+    "behavioral",
+    "cultural",
+    "culture",
+    "behavioural_cultural",
+    "behavioral_cultural",
+}
 
 
 def _section_key(name: str) -> str:
@@ -65,6 +73,10 @@ def _is_technical_section(section: InterviewSection) -> bool:
         bool(section.skill)
         and _section_key(section.section_name) not in NON_TECH_SECTION_KEYS
     )
+
+
+def _is_behavioural_cultural_section(section: InterviewSection) -> bool:
+    return _section_key(section.section_name) in BEHAVIOURAL_CULTURAL_SECTION_KEYS
 
 
 def _section_importance(section: InterviewSection) -> float:
@@ -165,6 +177,52 @@ def _enforce_technical_priority(
         receiver = max(
             tech_indices,
             key=lambda idx: (float(sections[idx].priority_score or 0.0), tenths[idx]),
+        )
+        tenths[donor] -= 1
+        tenths[receiver] += 1
+
+    return tenths
+
+
+def _enforce_behavioural_cultural_cap(
+    sections: list[InterviewSection],
+    tenths: list[int],
+    total_tenths: int,
+) -> list[int]:
+    """Keep the combined behavioural/cultural allocation at or below 10%."""
+
+    behavioural_indices = [
+        index
+        for index, section in enumerate(sections)
+        if _is_behavioural_cultural_section(section)
+    ]
+    if not behavioural_indices:
+        return tenths
+
+    cap = max(len(behavioural_indices), total_tenths // 10)
+    while sum(tenths[index] for index in behavioural_indices) > cap:
+        donor = max(behavioural_indices, key=lambda index: tenths[index])
+        if tenths[donor] <= 1:
+            break
+
+        technical_indices = [
+            index
+            for index, section in enumerate(sections)
+            if _is_technical_section(section)
+        ]
+        receiver_pool = technical_indices or [
+            index for index in range(len(sections)) if index not in behavioural_indices
+        ]
+        if not receiver_pool:
+            break
+
+        receiver = max(
+            receiver_pool,
+            key=lambda index: (
+                _section_importance(sections[index]),
+                float(sections[index].priority_score or 0.0),
+                tenths[index],
+            ),
         )
         tenths[donor] -= 1
         tenths[receiver] += 1
@@ -313,6 +371,7 @@ def _normalize_interview_plan(
     tenths = _adjust_tenths_to_total(sections, tenths, total_tenths)
     tenths = _enforce_technical_priority(sections, tenths)
     tenths = _adjust_tenths_to_total(sections, tenths, total_tenths)
+    tenths = _enforce_behavioural_cultural_cap(sections, tenths, total_tenths)
 
     normalized_sections: list[InterviewSection] = []
     for section, value in zip(sections, tenths, strict=True):
@@ -368,11 +427,11 @@ Interview-plan design technique:
   3. behavioural_cultural
 - behavioural and cultural must be combined into one final section named exactly "behavioural_cultural".
 - Always include the behavioural_cultural section, even for very short interviews.
-- The behavioural_cultural section must always receive enough time for the bot to ask at least one meaningful behavioural or cultural-fit question.
-- For extremely short interviews, allocate a very small but non-zero amount of time to behavioural_cultural, such as 0.2 to 0.5 minutes, so the section is still represented and can be executed.
+- The behavioural_cultural section must never exceed 10 percent of total interview time. This is a hard cap, not a target.
+- For extremely short interviews, allocate a very small but non-zero amount of time to behavioural_cultural, such as 0.2 minutes, so the section is still represented and can be executed without reducing technical coverage beyond the cap.
 - The self_intro section should be short and should not consume time that is needed for technical assessment.
-- First reserve the minimum useful non-technical time for self_intro and behavioural_cultural.
-- After reserving minimum non-technical time, allocate the remaining time to technical sections.
+- First reserve a short self_intro and at most 10 percent for behavioural_cultural.
+- Allocate every remaining minute to technical sections.
 - Technical sections must receive more total time than self_intro and behavioural_cultural combined whenever the interview duration makes this possible.
 - For technical roles, the total technical time should normally be the majority of the interview.
 - Allocate technical time proportionally by priority_score, adjusted by focus_areas weight_override when provided.
@@ -382,12 +441,13 @@ Interview-plan design technique:
 - Skills with high priority_score, strong JD evidence, or Expert depth_required should be preserved whenever possible.
 - If time is constrained, reduce allocation to lower-priority skills before completely dropping them.
 - If time is too small for all skills, drop lower-priority or nice-to-have skills from interview_plan.sections, but keep them in jd_analysis.skills.
-- For 2-4 minute interviews: include self_intro, behavioural_cultural, and at least one top technical skill. If possible, include a second high-priority technical skill only if both technical skills can still be meaningfully assessed.
-- For 5-9 minute interviews: include self_intro, behavioural_cultural, and cover the top 2-3 technical skills when possible.
-- For 10-19 minute interviews: include self_intro, behavioural_cultural, and cover the top 3-5 technical skills when possible.
-- For 20-45 minute interviews: include self_intro, behavioural_cultural, and cover the top 4-7 technical skills when possible.
-- For longer interviews: include additional relevant skills when each receives enough time to be meaningfully assessed.
-- Avoid unnecessary fragmentation, but do not over-prune skills. A skill should only be omitted if its allocated time would be too small to support a real answer.
+- Include as many technical skills as possible in the interview plan. Do NOT cap the number of technical skills unnecessarily; a skill can be covered in just 2-3 minutes.
+- For 2-4 minute interviews: include self_intro, behavioural_cultural, and 2-3 top technical skills.
+- For 5-9 minute interviews: include self_intro, behavioural_cultural, and 3-5 technical skills.
+- For 10-19 minute interviews: include self_intro, behavioural_cultural, and 4-8 technical skills (e.g., a 15-minute interview can easily fit 4-6 skills).
+- For 20-45 minute interviews: include self_intro, behavioural_cultural, and cover 6-10+ technical skills.
+- For longer interviews: include as many relevant skills as possible.
+- Avoid dropping skills just to fit a time constraint. Only omit a skill if there are simply too many skills for the allotted time (even at ~2 minutes per skill).
 - Section order should be natural: short self_intro first, technical sections by importance, then behavioural_cultural.
 - allocated_mins can use one decimal place. The sum of allocated_mins MUST equal total_mins exactly.
 - For self_intro and behavioural_cultural sections, skill MUST be null.

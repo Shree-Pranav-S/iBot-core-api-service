@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from typing import Any
 
-from src.data.clients.celery_client import celery_app
+from src.data.clients.celery_client import celery_app, run_async
 from src.data.repositories.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -53,7 +52,7 @@ async def _log_invitation_failure(
 def send_invitation_email_task(self: Any, payload: dict[str, Any]) -> None:
     """Send and log one candidate invitation email."""
     try:
-        asyncio.run(_send_invitation(payload))
+        run_async(_send_invitation(payload))
     except Exception as exc:
         if self.request.retries < self.max_retries:
             countdown = min(60, 2**self.request.retries)
@@ -72,7 +71,7 @@ def send_invitation_email_task(self: Any, payload: dict[str, Any]) -> None:
             extra={"candidate_assessment_id": payload.get("candidate_assessment_id")},
         )
         try:
-            asyncio.run(_log_invitation_failure(payload, error_message))
+            run_async(_log_invitation_failure(payload, error_message))
         except Exception:
             logger.exception(
                 "Failed to write invitation failure log",

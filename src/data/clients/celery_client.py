@@ -1,9 +1,23 @@
 """Celery client configuration for core API background workloads."""
 
+import asyncio
+
 from celery import Celery
 from kombu import Queue
 
 from src.config.settings import settings
+
+_celery_loop = None
+
+
+def run_async(coro):
+    """Run an async coroutine without closing the underlying event loop."""
+    global _celery_loop
+    if _celery_loop is None:
+        _celery_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_celery_loop)
+    return _celery_loop.run_until_complete(coro)
+
 
 celery_app = Celery(
     "core_api_service",

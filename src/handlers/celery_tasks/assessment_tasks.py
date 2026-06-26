@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 import uuid
 from typing import Any
 
 from src.core.services.assessment_service import AssessmentService
-from src.data.clients.celery_client import celery_app
+from src.data.clients.celery_client import celery_app, run_async
 from src.data.clients.postgres_client import get_session_factory
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import FocusAreaOverride
@@ -63,7 +62,7 @@ def process_assessment_task(
 ) -> None:
     """Generate JD analysis and interview plan for an assessment."""
     try:
-        asyncio.run(
+        run_async(
             _process_assessment(
                 assessment_id,
                 jd_text,

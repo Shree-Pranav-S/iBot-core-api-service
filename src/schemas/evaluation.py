@@ -15,6 +15,7 @@ class TranscriptEvidence(AppBaseModel):
     turn_number: int | None = None
     section: str | None = None
     skill: str | None = None
+    question: str | None = None
     quote: str
     interpretation: str
 
@@ -43,6 +44,9 @@ class EvaluationSectionSummary(AppBaseModel):
     difficulty_reached: str | float | None = None
     questions_asked: int | None = None
     evidence: list[TranscriptEvidence] = []
+    signals_demonstrated: list[str] = []
+    signals_missing: list[str] = []
+    score_basis: str | None = None
 
 
 class HighlightAnswer(AppBaseModel):
