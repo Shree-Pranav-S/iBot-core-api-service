@@ -13,10 +13,13 @@ from src.core.exceptions import (
     InternalServerException,
 )
 from src.schemas.assessment import (
+    BehaviouralCulturalSection,
     FocusAreaOverride,
     InterviewPlan,
-    InterviewSection,
+    JDAnalysis,
     JDAnalysisAndInterviewPlan,
+    SelfIntroSection,
+    TechnicalInterviewSection,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,17 +45,6 @@ async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
         ) from exc
 
 
-NON_TECH_SECTION_KEYS = {
-    "self_intro",
-    "intro",
-    "introduction",
-    "behavioural",
-    "behavioral",
-    "cultural",
-    "culture",
-    "behavioural_cultural",
-    "behavioral_cultural",
-}
 BEHAVIOURAL_CULTURAL_SECTION_KEYS = {
     "behavioural",
     "behavioral",
@@ -68,327 +60,202 @@ def _section_key(name: str) -> str:
     return key or "section"
 
 
-def _is_technical_section(section: InterviewSection) -> bool:
-    return (
-        bool(section.skill)
-        and _section_key(section.section_name) not in NON_TECH_SECTION_KEYS
+def _technical_signal_map(plan: InterviewPlan) -> dict[str, list[str]]:
+    signals: dict[str, list[str]] = {}
+    for section in plan.sections:
+        if not isinstance(section, TechnicalInterviewSection):
+            continue
+        key = _section_key(section.skill)
+        signals[key] = [
+            signal.strip()
+            for signal in section.expected_signals
+            if signal and signal.strip()
+        ][:4]
+    return signals
+
+
+def _behavioural_signals(plan: InterviewPlan, jd_analysis: JDAnalysis) -> list[str]:
+    generated: list[str] = []
+    for section in plan.sections:
+        if (
+            isinstance(section, BehaviouralCulturalSection)
+            or _section_key(section.section_name) in BEHAVIOURAL_CULTURAL_SECTION_KEYS
+        ):
+            generated.extend(getattr(section, "expected_signals", []))
+
+    generated.extend(jd_analysis.behavioural_signals)
+    generated.extend(
+        [
+            "Evidence-based collaboration and conflict resolution",
+            "Ownership, adaptability, and clear communication",
+            "Alignment with team culture and working norms",
+        ]
     )
 
+    unique: list[str] = []
+    seen: set[str] = set()
+    for signal in generated:
+        cleaned = str(signal).strip()
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            unique.append(cleaned)
+            seen.add(key)
 
-def _is_behavioural_cultural_section(section: InterviewSection) -> bool:
-    return _section_key(section.section_name) in BEHAVIOURAL_CULTURAL_SECTION_KEYS
-
-
-def _section_importance(section: InterviewSection) -> float:
-    if _is_technical_section(section):
-        return 100.0 + float(section.priority_score or 5.0)
-    key = _section_key(section.section_name)
-    if key in {"self_intro", "intro", "introduction"}:
-        return 20.0
-    if key in {
-        "behavioural_cultural",
-        "behavioral_cultural",
-        "behavioural",
-        "behavioral",
-        "cultural",
-        "culture",
-    }:
-        return 15.0
-    return 5.0
-
-
-def _drop_overflow_sections(
-    sections: list[InterviewSection], total_tenths: int
-) -> list[InterviewSection]:
-    retained = list(sections)
-    while len(retained) > total_tenths and len(retained) > 1:
-        tech_count = sum(1 for section in retained if _is_technical_section(section))
-        drop_index = min(
-            range(len(retained)),
-            key=lambda idx: (
-                _section_importance(retained[idx])
-                + (
-                    1000.0
-                    if _is_technical_section(retained[idx]) and tech_count == 1
-                    else 0.0
-                ),
-                float(retained[idx].priority_score or 0.0),
-            ),
-        )
-        retained.pop(drop_index)
-    return retained
+    selected = unique[:4]
+    has_culture_signal = any(
+        marker in signal.casefold()
+        for signal in selected
+        for marker in ("culture", "team fit", "working norm")
+    )
+    if not has_culture_signal:
+        culture_signal = "Alignment with team culture and working norms"
+        if len(selected) >= 4:
+            selected[-1] = culture_signal
+        else:
+            selected.append(culture_signal)
+    return selected
 
 
-def _adjust_tenths_to_total(
-    sections: list[InterviewSection], tenths: list[int], total_tenths: int
-) -> list[int]:
-    while sum(tenths) < total_tenths:
-        target = max(
-            range(len(sections)),
-            key=lambda idx: (_section_importance(sections[idx]), tenths[idx]),
-        )
-        tenths[target] += 1
-
-    while sum(tenths) > total_tenths:
-        reducible = [idx for idx, value in enumerate(tenths) if value > 1]
-        if not reducible:
-            break
-        target = min(
-            reducible,
-            key=lambda idx: (_section_importance(sections[idx]), -tenths[idx]),
-        )
-        tenths[target] -= 1
-
-    return tenths
-
-
-def _enforce_technical_priority(
-    sections: list[InterviewSection], tenths: list[int]
-) -> list[int]:
-    tech_indices = [
-        idx for idx, section in enumerate(sections) if _is_technical_section(section)
-    ]
-    non_tech_indices = [idx for idx in range(len(sections)) if idx not in tech_indices]
-    if not tech_indices or not non_tech_indices:
-        return tenths
-
-    def can_shift() -> bool:
-        return any(tenths[idx] > 1 for idx in non_tech_indices)
-
-    while (
-        sum(tenths[idx] for idx in tech_indices)
-        <= sum(tenths[idx] for idx in non_tech_indices)
-        and can_shift()
-    ):
-        donor = max(non_tech_indices, key=lambda idx: tenths[idx])
-        receiver = max(
-            tech_indices,
-            key=lambda idx: (float(sections[idx].priority_score or 0.0), tenths[idx]),
-        )
-        tenths[donor] -= 1
-        tenths[receiver] += 1
-
-    while (
-        max(tenths[idx] for idx in tech_indices)
-        <= max(tenths[idx] for idx in non_tech_indices)
-        and can_shift()
-    ):
-        donor = max(non_tech_indices, key=lambda idx: tenths[idx])
-        receiver = max(
-            tech_indices,
-            key=lambda idx: (float(sections[idx].priority_score or 0.0), tenths[idx]),
-        )
-        tenths[donor] -= 1
-        tenths[receiver] += 1
-
-    return tenths
+def _technical_expected_signals(
+    skill: str,
+    signal_map: dict[str, list[str]],
+) -> list[str]:
+    generated = list(signal_map.get(_section_key(skill)) or [])
+    generated.extend(
+        [
+            f"Understanding of core {skill} concepts",
+            f"Ability to apply {skill} in practical role-relevant scenarios",
+        ]
+    )
+    unique: list[str] = []
+    seen: set[str] = set()
+    for signal in generated:
+        cleaned = str(signal).strip()
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            unique.append(cleaned)
+            seen.add(key)
+    return unique[:4]
 
 
-def _enforce_behavioural_cultural_cap(
-    sections: list[InterviewSection],
-    tenths: list[int],
+def _focus_weights(
+    focus_areas: list[FocusAreaOverride] | None,
+) -> dict[str, float]:
+    return {
+        _section_key(item.skill): float(item.weight_override)
+        for item in focus_areas or []
+    }
+
+
+def _allocate_technical_tenths(
+    weights: list[float],
     total_tenths: int,
 ) -> list[int]:
-    """Keep the combined behavioural/cultural allocation at or below 10%."""
+    """Maximize covered skills, then distribute remaining time by weight."""
 
-    behavioural_indices = [
-        index
-        for index, section in enumerate(sections)
-        if _is_behavioural_cultural_section(section)
+    minimum_tenths = 5
+    allocations = [minimum_tenths for _ in weights]
+    remaining = total_tenths - sum(allocations)
+    if remaining <= 0:
+        return allocations
+
+    normalized_weights = [max(0.0, weight) for weight in weights]
+    weight_total = sum(normalized_weights)
+    if weight_total <= 0:
+        normalized_weights = [1.0 for _ in weights]
+        weight_total = float(len(weights))
+
+    exact_shares = [remaining * weight / weight_total for weight in normalized_weights]
+    whole_shares = [int(share) for share in exact_shares]
+    allocations = [
+        allocation + share
+        for allocation, share in zip(allocations, whole_shares, strict=True)
     ]
-    if not behavioural_indices:
-        return tenths
 
-    cap = max(len(behavioural_indices), total_tenths // 10)
-    while sum(tenths[index] for index in behavioural_indices) > cap:
-        donor = max(behavioural_indices, key=lambda index: tenths[index])
-        if tenths[donor] <= 1:
-            break
-
-        technical_indices = [
-            index
-            for index, section in enumerate(sections)
-            if _is_technical_section(section)
-        ]
-        receiver_pool = technical_indices or [
-            index for index in range(len(sections)) if index not in behavioural_indices
-        ]
-        if not receiver_pool:
-            break
-
-        receiver = max(
-            receiver_pool,
-            key=lambda index: (
-                _section_importance(sections[index]),
-                float(sections[index].priority_score or 0.0),
-                tenths[index],
-            ),
-        )
-        tenths[donor] -= 1
-        tenths[receiver] += 1
-
-    return tenths
-
-
-def _dedupe_section_names(sections: list[InterviewSection]) -> list[InterviewSection]:
-    used: dict[str, int] = {}
-    for index, section in enumerate(sections):
-        base_name = section.section_name or section.skill or f"section_{index + 1}"
-        key = _section_key(base_name)
-        count = used.get(key, 0)
-        used[key] = count + 1
-        if count:
-            section.section_name = f"{base_name}_{count + 1}"
-        else:
-            section.section_name = base_name
-    return sections
-
-
-def _combined_behavioural_cultural_section(
-    sections: list[InterviewSection],
-) -> tuple[list[InterviewSection], InterviewSection]:
-    retained: list[InterviewSection] = []
-    combined: InterviewSection | None = None
-    expected_signals: list[str] = []
-    allocated_mins = 0.0
-
-    for section in sections:
-        key = _section_key(section.section_name)
-        if key not in {
-            "behavioural_cultural",
-            "behavioral_cultural",
-            "behavioural",
-            "behavioral",
-            "cultural",
-            "culture",
-        }:
-            retained.append(section)
-            continue
-
-        allocated_mins += max(0.0, float(section.allocated_mins or 0))
-        for signal in section.expected_signals or []:
-            if signal not in expected_signals:
-                expected_signals.append(signal)
-        combined = InterviewSection(
-            section_name="behavioural_cultural",
-            skill=None,
-            allocated_mins=allocated_mins,
-            priority_score=None,
-            expected_signals=expected_signals,
-        )
-
-    if combined is None:
-        combined = InterviewSection(
-            section_name="behavioural_cultural",
-            skill=None,
-            allocated_mins=0.3,
-            priority_score=None,
-            expected_signals=[
-                "behavioural example",
-                "team collaboration",
-                "culture fit",
-            ],
-        )
-
-    if not combined.expected_signals:
-        combined.expected_signals = [
-            "behavioural example",
-            "team collaboration",
-            "culture fit",
-        ]
-
-    return retained, combined
-
-
-def _normalize_required_section_shape(
-    sections: list[InterviewSection],
-) -> list[InterviewSection]:
-    retained, behavioural_cultural = _combined_behavioural_cultural_section(sections)
-    intro_sections: list[InterviewSection] = []
-    technical_sections: list[InterviewSection] = []
-    other_sections: list[InterviewSection] = []
-
-    for section in retained:
-        key = _section_key(section.section_name)
-        if key in {"self_intro", "intro", "introduction"}:
-            intro_sections.append(
-                InterviewSection(
-                    section_name="self_intro",
-                    skill=None,
-                    allocated_mins=section.allocated_mins,
-                    priority_score=None,
-                    expected_signals=section.expected_signals,
-                )
-            )
-        elif _is_technical_section(section):
-            technical_sections.append(section)
-        else:
-            other_sections.append(section)
-
-    if not intro_sections:
-        intro_sections.append(
-            InterviewSection(
-                section_name="self_intro",
-                skill=None,
-                allocated_mins=0.3,
-                priority_score=None,
-                expected_signals=["concise background", "role fit"],
-            )
-        )
-
-    return [
-        intro_sections[0],
-        *technical_sections,
-        *other_sections,
-        behavioural_cultural,
-    ]
+    remainder = remaining - sum(whole_shares)
+    ranked_remainders = sorted(
+        range(len(weights)),
+        key=lambda index: (
+            exact_shares[index] - whole_shares[index],
+            normalized_weights[index],
+            -index,
+        ),
+        reverse=True,
+    )
+    for index in ranked_remainders[:remainder]:
+        allocations[index] += 1
+    return allocations
 
 
 def _normalize_interview_plan(
     plan: InterviewPlan,
     duration_mins: int,
+    jd_analysis: JDAnalysis,
+    focus_areas: list[FocusAreaOverride] | None,
 ) -> InterviewPlan:
-    total_tenths = max(1, int(duration_mins * 10))
-    sections = [section for section in plan.sections if section.allocated_mins > 0]
-    if not sections:
+    """Build the final plan deterministically from JD priorities."""
+
+    total_tenths = int(duration_mins * 10)
+    intro_tenths = 10
+    behavioural_tenths = int(duration_mins)
+    technical_tenths = total_tenths - intro_tenths - behavioural_tenths
+    if technical_tenths < 5:
         raise ValueError(
-            "LLM returned an interview plan with no positive-duration sections."
+            "Interview duration leaves less than 30 seconds for technical assessment."
         )
 
-    sections = _normalize_required_section_shape(sections)
-    sections = _drop_overflow_sections(sections, total_tenths)
-    raw_tenths = [
-        max(1, int(round(section.allocated_mins * 10))) for section in sections
-    ]
-    raw_total = sum(raw_tenths)
-    if raw_total <= 0:
-        raw_tenths = [1 for _ in sections]
-        raw_total = sum(raw_tenths)
+    focus_weights = _focus_weights(focus_areas)
+    signal_map = _technical_signal_map(plan)
 
-    tenths = [
-        max(1, int(round(value * total_tenths / raw_total))) for value in raw_tenths
-    ]
-    tenths = _adjust_tenths_to_total(sections, tenths, total_tenths)
-    tenths = _enforce_technical_priority(sections, tenths)
-    tenths = _adjust_tenths_to_total(sections, tenths, total_tenths)
-    tenths = _enforce_behavioural_cultural_cap(sections, tenths, total_tenths)
+    unique_skills: list[tuple[int, str, float]] = []
+    seen_skills: set[str] = set()
+    for index, item in enumerate(jd_analysis.skills):
+        key = _section_key(item.skill)
+        if key in seen_skills:
+            continue
+        seen_skills.add(key)
+        effective_weight = focus_weights.get(key, float(item.priority_score))
+        unique_skills.append((index, item.skill, effective_weight))
 
-    normalized_sections: list[InterviewSection] = []
-    for section, value in zip(sections, tenths, strict=True):
-        normalized_sections.append(
-            InterviewSection(
-                section_name=section.section_name,
-                skill=section.skill,
-                allocated_mins=round(value / 10.0, 1),
-                priority_score=section.priority_score,
-                expected_signals=section.expected_signals,
+    if not unique_skills:
+        raise ValueError("JD analysis returned no technical skills.")
+
+    maximum_skill_count = max(1, technical_tenths // 5)
+    selected_skills = sorted(
+        unique_skills,
+        key=lambda item: (-item[2], item[0]),
+    )[:maximum_skill_count]
+    allocations = _allocate_technical_tenths(
+        [item[2] for item in selected_skills],
+        technical_tenths,
+    )
+
+    technical_sections: list[TechnicalInterviewSection] = []
+    for (_, skill, _), allocated_tenths in zip(
+        selected_skills,
+        allocations,
+        strict=True,
+    ):
+        technical_sections.append(
+            TechnicalInterviewSection(
+                section_name=skill,
+                skill=skill,
+                allocated_mins=round(allocated_tenths / 10.0, 1),
+                expected_signals=_technical_expected_signals(skill, signal_map),
             )
         )
 
-    normalized_sections = _dedupe_section_names(normalized_sections)
     return InterviewPlan(
         total_mins=duration_mins,
-        sections=normalized_sections,
+        inferred_difficulty=jd_analysis.inferred_difficulty,
+        sections=[
+            SelfIntroSection(allocated_mins=1.0),
+            *technical_sections,
+            BehaviouralCulturalSection(
+                allocated_mins=round(behavioural_tenths / 10.0, 1),
+                expected_signals=_behavioural_signals(plan, jd_analysis),
+            ),
+        ],
     )
 
 
@@ -402,89 +269,244 @@ def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
 
 def _combined_analysis_system_prompt() -> str:
     return """
-You are an expert technical recruiter, interview architect, and structured assessment designer.
+You are an expert technical recruiter and structured interview architect. Analyze
+the supplied job description and return one JSON object containing `jd_analysis`
+and `interview_plan`. The output is validated by a strict schema and stored
+directly in a database, so never add undeclared fields.
 
-Your task is to analyze a Job Description (JD) and produce TWO objects in ONE JSON response:
-1. jd_analysis: the structured JD analysis.
-2. interview_plan: a concrete section-by-section plan that the interview bot will execute and the recruiter UI will display.
+REQUIRED WORK ORDER
+1. Infer the role difficulty from the JD.
+2. Extract distinct, interviewable technical skills and score their importance.
+3. Extract behavioural and team-culture signals.
+4. Copy the exact inferred difficulty into the interview plan.
+5. Build a time plan that maximizes meaningful technical coverage.
 
-Work in this order internally:
-1. Extract the JD analysis first.
-2. Use that exact JD analysis, especially skill priority_score and depth_required, to design the interview plan.
+INFERRED DIFFICULTY
+Use exactly one of:
+- "junior level"
+- "mid-level"
+- "senior level"
 
-JD analysis scoring rules for priority_score from 1.0 to 10.0:
-- Positioning: skills in the title, summary, responsibilities, or early requirements rank higher.
-- Frequency: repeated skills across sections rank higher.
-- Language strength: required, must-have, strong expertise, owns, designs, leads, or deep understanding are high-priority signals. Familiarity, exposure, nice-to-have, bonus, or plus are low-priority signals.
-- Responsibility coupling: skills tied directly to core work rank higher than skills listed only in a broad stack.
-- Seniority/depth: senior ownership, architecture, mentoring, production operations, scaling, or security responsibilities raise depth_required.
+Years-of-experience rules:
+- A role requiring 0-2 years is always "junior level".
+- Intern, graduate, trainee, entry-level, junior, and associate roles are normally
+  "junior level", unless the JD clearly contradicts the label.
+- A role requiring roughly 3-6 years is normally "mid-level".
+- Requirements such as 3+ years or 5+ years are "mid-level" by default when the
+  person independently delivers features or services but does not own broad
+  architecture or organizational technical direction.
+- A role requiring 7+ years is normally "senior level".
+- Senior, lead, staff, principal, architect, or engineering-manager roles are
+  "senior level" when responsibilities include architecture, production strategy,
+  cross-team ownership, mentoring, technical leadership, scaling, security, or
+  high-impact design decisions.
+- If an experience range crosses bands, use the responsibility level to decide.
+  Example: 5-8 years with feature ownership is mid-level; 5-8 years with system
+  architecture, mentoring, and cross-team leadership is senior-level.
+- If years are absent, infer from the title and responsibilities. Do not inflate a
+  role to senior merely because its technology is sophisticated.
+- Prefer the explicit minimum required experience over optional/preferred
+  experience. Do not use the candidate's experience; analyze only the JD.
 
-Interview-plan design technique:
-- The input duration can be any integer from 2 to 180 minutes. Always honor it exactly.
-- The interview_plan must contain exactly these section types in this natural order:
-  1. self_intro
-  2. one or more technical sections, where each technical section is named after a skill
-  3. behavioural_cultural
-- behavioural and cultural must be combined into one final section named exactly "behavioural_cultural".
-- Always include the behavioural_cultural section, even for very short interviews.
-- The behavioural_cultural section must never exceed 10 percent of total interview time. This is a hard cap, not a target.
-- For extremely short interviews, allocate a very small but non-zero amount of time to behavioural_cultural, such as 0.2 minutes, so the section is still represented and can be executed without reducing technical coverage beyond the cap.
-- The self_intro section should be short and should not consume time that is needed for technical assessment.
-- First reserve a short self_intro and at most 10 percent for behavioural_cultural.
-- Allocate every remaining minute to technical sections.
-- Technical sections must receive more total time than self_intro and behavioural_cultural combined whenever the interview duration makes this possible.
-- For technical roles, the total technical time should normally be the majority of the interview.
-- Allocate technical time proportionally by priority_score, adjusted by focus_areas weight_override when provided.
-- Do not drop important technical skills unnecessarily.
-- Prefer covering more relevant JD skills when each can still receive enough time for at least one meaningful technical question.
-- Only drop a skill from interview_plan.sections when it is clearly lower-priority, nice-to-have, weakly mentioned, or impossible to assess meaningfully within the available time.
-- Skills with high priority_score, strong JD evidence, or Expert depth_required should be preserved whenever possible.
-- If time is constrained, reduce allocation to lower-priority skills before completely dropping them.
-- If time is too small for all skills, drop lower-priority or nice-to-have skills from interview_plan.sections, but keep them in jd_analysis.skills.
-- Include as many technical skills as possible in the interview plan. Do NOT cap the number of technical skills unnecessarily; a skill can be covered in just 2-3 minutes.
-- For 2-4 minute interviews: include self_intro, behavioural_cultural, and 2-3 top technical skills.
-- For 5-9 minute interviews: include self_intro, behavioural_cultural, and 3-5 technical skills.
-- For 10-19 minute interviews: include self_intro, behavioural_cultural, and 4-8 technical skills (e.g., a 15-minute interview can easily fit 4-6 skills).
-- For 20-45 minute interviews: include self_intro, behavioural_cultural, and cover 6-10+ technical skills.
-- For longer interviews: include as many relevant skills as possible.
-- Avoid dropping skills just to fit a time constraint. Only omit a skill if there are simply too many skills for the allotted time (even at ~2 minutes per skill).
-- Section order should be natural: short self_intro first, technical sections by importance, then behavioural_cultural.
-- allocated_mins can use one decimal place. The sum of allocated_mins MUST equal total_mins exactly.
-- For self_intro and behavioural_cultural sections, skill MUST be null.
-- For technical sections, skill MUST be the exact skill name from jd_analysis.skills.
-- For technical sections, section_name MUST be the exact same value as skill.
-- For self_intro and behavioural_cultural sections, priority_score MUST be null.
-- For technical sections, priority_score MUST match the corresponding skill's priority_score from jd_analysis.skills.
-- expected_signals should list 2-4 concise signals the bot should listen for in that section.
-- For behavioural_cultural, expected_signals must include both behavioural signals and cultural/team-fit signals.
-- Do not include max_questions, max_questions_per_section, max_followups_per_question, or any other question-count control fields. The interview bot will dynamically decide question count and follow-ups during execution.
+JD SKILL EXTRACTION AND PRIORITY
+- Include concrete technical skills that can be assessed in an interview:
+  languages, frameworks, databases, cloud/platform tools, architecture domains,
+  engineering practices, and directly relevant technical concepts.
+- Consolidate aliases and duplicates into one clear skill name.
+- Do not put communication, teamwork, leadership, ownership, or culture-fit traits
+  in `skills`; place those in `behavioural_signals`.
+- Keep relevant nice-to-have technical skills in `jd_analysis.skills`; the
+  deterministic planner may omit only those that cannot receive 30 seconds.
+- Score `priority_score` from 1.0 to 10.0:
+  * 9.0-10.0: indispensable core competency repeatedly tied to primary duties.
+  * 7.0-8.9: strongly required and regularly used in the role.
+  * 5.0-6.9: relevant supporting competency or moderately emphasized requirement.
+  * 3.0-4.9: useful secondary or preferred competency.
+  * 1.0-2.9: weakly mentioned, optional, or peripheral competency.
+- Raise priority for explicit must-have language, repetition, placement in core
+  responsibilities, ownership, and direct coupling to daily work.
+- Lower priority for "nice to have", "bonus", "exposure", broad stack lists, or
+  incidental tooling.
+- `reasoning` must briefly cite JD evidence and explain the score. Do not invent
+  requirements.
+- Do not output `depth_required`, `inferred_role_title`, `seniority_level`, or a
+  separate `difficulty` field.
 
-Return only raw JSON. No markdown, comments, or prose outside JSON.
-The JSON must strictly match this schema:
+INTERVIEW PLAN — HARD RULES
+- `total_mins` must exactly equal the supplied duration.
+- `inferred_difficulty` must exactly equal `jd_analysis.inferred_difficulty`.
+- Sections must be ordered as:
+  1. `self_intro`
+  2. technical skill sections in descending effective importance
+  3. `behavioural_cultural`
+- `self_intro` is always exactly 1.0 minute, has `skill: null`, and must NOT contain
+  `expected_signals`.
+- `behavioural_cultural` is always exactly 10 percent of total interview time.
+  For 15 minutes it is exactly 1.5 minutes; for 30 minutes it is exactly 3.0.
+- Allocate every remaining minute to technical skills.
+- Technical time is weighted by the matching JD `priority_score`. When a matching
+  `focus_areas.weight_override` exists, use it as that skill's effective weight.
+- Include as many JD technical skills as possible. Every included technical skill
+  must receive at least 0.5 minute. Drop a skill only when available technical
+  time is too low to give it 0.5 minute; drop the lowest effective-weight skill
+  first. Never impose an arbitrary skill-count cap.
+- A technical section's `section_name` and `skill` must both exactly match the
+  corresponding `jd_analysis.skills[].skill`.
+- Technical and behavioural sections need 2-4 concise, observable
+  `expected_signals`. Signals should describe evidence to listen for, not questions.
+- Behavioural/cultural signals must cover both work behaviour (ownership,
+  collaboration, conflict handling, adaptability, communication) and alignment
+  with team culture or working norms.
+- Do not include `priority_score` in interview-plan sections. Priority lives only
+  in `jd_analysis`.
+- Do not include question-count limits, follow-up limits, depth fields, role-title
+  fields, or any other undeclared fields.
+- Use one decimal place for section minutes. Allocations must sum exactly to
+  `total_mins`.
+
+ONE-SHOT EXAMPLE
+Example input summary: 15-minute Python backend interview; JD asks for 0-2 years,
+emphasizes Python, SQL, database foundations, Git, and a Python web framework.
+Therefore the inferred difficulty is junior level. A valid output is:
 {
   "jd_analysis": {
-    "inferred_role_title": "string",
-    "seniority_level": "Junior | Mid-level | Senior",
-    "difficulty": "Low | Medium | High",
+    "inferred_difficulty": "junior level",
+    "skills": [
+      {
+        "skill": "Python",
+        "priority_score": 9.5,
+        "reasoning": "Python is the primary required language and is central to the listed backend responsibilities."
+      },
+      {
+        "skill": "SQL",
+        "priority_score": 8.0,
+        "reasoning": "The JD explicitly requires writing SQL queries for application data access."
+      },
+      {
+        "skill": "Database Foundations",
+        "priority_score": 7.0,
+        "reasoning": "Database concepts are required for schema and persistence work."
+      },
+      {
+        "skill": "Git",
+        "priority_score": 4.0,
+        "reasoning": "Git is required as a supporting collaboration tool."
+      },
+      {
+        "skill": "Python Web Framework",
+        "priority_score": 4.0,
+        "reasoning": "Framework familiarity is requested but no specific framework is emphasized."
+      }
+    ],
+    "behavioural_signals": [
+      "Collaborative mindset",
+      "Strong problem-solving skills",
+      "Motivation to learn"
+    ]
+  },
+  "interview_plan": {
+    "total_mins": 15,
+    "inferred_difficulty": "junior level",
+    "sections": [
+      {
+        "section_name": "self_intro",
+        "skill": null,
+        "allocated_mins": 1.0
+      },
+      {
+        "section_name": "Python",
+        "skill": "Python",
+        "allocated_mins": 4.1,
+        "expected_signals": [
+          "Understanding of Python fundamentals",
+          "Ability to write clean and readable code"
+        ]
+      },
+      {
+        "section_name": "SQL",
+        "skill": "SQL",
+        "allocated_mins": 3.5,
+        "expected_signals": [
+          "Understanding of SQL query fundamentals",
+          "Ability to construct role-relevant queries"
+        ]
+      },
+      {
+        "section_name": "Database Foundations",
+        "skill": "Database Foundations",
+        "allocated_mins": 3.1,
+        "expected_signals": [
+          "Understanding of relational database concepts",
+          "Ability to explain basic schema decisions"
+        ]
+      },
+      {
+        "section_name": "Git",
+        "skill": "Git",
+        "allocated_mins": 0.9,
+        "expected_signals": [
+          "Understanding of core Git concepts",
+          "Ability to use Git in a collaborative workflow"
+        ]
+      },
+      {
+        "section_name": "Python Web Framework",
+        "skill": "Python Web Framework",
+        "allocated_mins": 0.9,
+        "expected_signals": [
+          "Understanding of web framework fundamentals",
+          "Ability to apply a Python framework to a simple backend task"
+        ]
+      },
+      {
+        "section_name": "behavioural_cultural",
+        "skill": null,
+        "allocated_mins": 1.5,
+        "expected_signals": [
+          "Collaborative mindset",
+          "Evidence-based problem solving",
+          "Motivation to learn",
+          "Alignment with team culture and working norms"
+        ]
+      }
+    ]
+  }
+}
+
+Return only raw JSON with no markdown, comments, analysis, or surrounding prose.
+The exact permitted structure is:
+{
+  "jd_analysis": {
+    "inferred_difficulty": "junior level",
     "skills": [
       {
         "skill": "string",
         "priority_score": 1.0,
-        "depth_required": "Awareness | Intermediate | Expert",
-        "reasoning": "string with JD evidence for the score"
+        "reasoning": "string"
       }
     ],
     "behavioural_signals": ["string"]
   },
   "interview_plan": {
-    "total_mins": 30,
+    "total_mins": 15,
+    "inferred_difficulty": "junior level",
     "sections": [
       {
-        "section_name": "self_intro | exact technical skill name | behavioural_cultural",
+        "section_name": "self_intro",
         "skill": null,
+        "allocated_mins": 1.0
+      },
+      {
+        "section_name": "exact technical skill name",
+        "skill": "exact technical skill name",
         "allocated_mins": 1.0,
-        "priority_score": null,
-        "expected_signals": ["string"]
+        "expected_signals": ["string", "string"]
+      },
+      {
+        "section_name": "behavioural_cultural",
+        "skill": null,
+        "allocated_mins": 1.5,
+        "expected_signals": ["string", "string"]
       }
     ]
   }
@@ -526,6 +548,8 @@ async def run_jd_analysis_and_interview_plan(
             normalized_plan = _normalize_interview_plan(
                 combined.interview_plan,
                 duration_mins,
+                combined.jd_analysis,
+                focus_areas,
             )
             return JDAnalysisAndInterviewPlan(
                 jd_analysis=combined.jd_analysis,

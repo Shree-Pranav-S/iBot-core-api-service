@@ -185,7 +185,7 @@ class AssessmentService:
                 assessment_id=assessment_id,
                 jd_text=parsed_jd_text,
                 jd_analysis=jd_analysis.model_dump(),
-                interview_plan=interview_plan.model_dump(exclude_none=True),
+                interview_plan=interview_plan.model_dump(),
             )
             logger.info(
                 "Successfully processed assessment %s asynchronously.", assessment_id
