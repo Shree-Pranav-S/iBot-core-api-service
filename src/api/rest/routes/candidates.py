@@ -218,10 +218,15 @@ async def list_recruiter_evaluations(
 
     data: list[RecruiterEvaluationListItem] = []
     for evaluation, ca, candidate, assessment in rows:
-        violation_entries = []
+        validated_violation_count = 0
         if isinstance(evaluation.violation_summary, dict):
-            entries = evaluation.violation_summary.get("entries")
-            violation_entries = entries if isinstance(entries, list) else []
+            validated_violation_count = int(
+                evaluation.violation_summary.get(
+                    "validated_violation_count",
+                    0,
+                )
+                or 0
+            )
         data.append(
             RecruiterEvaluationListItem(
                 candidate_assessment_id=ca.id,
@@ -237,17 +242,18 @@ async def list_recruiter_evaluations(
                 overall_score=evaluation.overall_score,
                 hiring_recommendation=evaluation.hiring_recommendation,
                 recommendation_reasoning=evaluation.recommendation_reasoning,
-                overall_narrative=evaluation.overall_narrative,
-                technical_dimension_score=evaluation.technical_dimension_score,
-                behavioural_score=evaluation.behavioural_score,
-                cultural_fit_score=evaluation.cultural_fit_score,
-                tone_classification_score=evaluation.tone_classification_score,
+                overall_summary=evaluation.overall_summary,
+                overall_technical_skill_score=(
+                    evaluation.overall_technical_skill_score
+                ),
+                behavioural_cultural_score=(evaluation.behavioural_cultural_score),
+                communication_score=evaluation.communication_score,
                 rank_in_assessment=evaluation.rank_in_assessment,
                 percentile_in_assessment=evaluation.percentile_in_assessment,
                 total_candidates_evaluated=evaluation.total_candidates_evaluated,
                 strengths=evaluation.strengths,
                 concerns=evaluation.concerns,
-                red_flags_count=len(violation_entries),
+                validated_violation_count=validated_violation_count,
                 skill_scores=evaluation.skill_scores,
             )
         )

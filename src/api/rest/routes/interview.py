@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import NotFoundException
+from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.schemas.candidate import TokenValidationResponse
 from src.schemas.common import APIResponse
@@ -34,7 +35,9 @@ async def validate_token(
         select(CandidateAssessment)
         .options(
             selectinload(CandidateAssessment.candidate),
-            selectinload(CandidateAssessment.assessment),
+            selectinload(CandidateAssessment.assessment).selectinload(
+                Assessment.recruiter
+            ),
         )
         .where(CandidateAssessment.invitation_token == token)
     )
@@ -63,6 +66,11 @@ async def validate_token(
 
     data = TokenValidationResponse(
         candidate_name=candidate.full_name,
+        company_name=(
+            assessment.recruiter.company_name
+            if assessment.recruiter is not None
+            else "the company"
+        ),
         assessment_title=assessment.title,
         interview_duration_mins=assessment.interview_duration_mins,
         window_end=assessment.window_end,

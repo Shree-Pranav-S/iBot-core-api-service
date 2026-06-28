@@ -56,7 +56,7 @@ class InterviewSession(Base):
     )
 
     # INITIALIZING | IN_PROGRESS | PAUSED | COMPLETED
-    # EVALUATED | DEACTIVATED | TERMINATED
+    # EVALUATED | EVALUATION_FAILED | DEACTIVATED | TERMINATED
     status: Mapped[str] = mapped_column(
         Text,
         nullable=False,

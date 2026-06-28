@@ -154,6 +154,7 @@ class TokenValidationResponse(AppBaseModel):
     """
 
     candidate_name: str
+    company_name: str
     assessment_title: str
     interview_duration_mins: int
     window_end: datetime
