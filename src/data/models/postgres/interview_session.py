@@ -55,7 +55,7 @@ class InterviewSession(Base):
         server_default="[]",
     )
 
-    # INITIALIZING | IN_PROGRESS | PAUSED | COMPLETED
+    # INITIALIZING | IN_PROGRESS | DISCONNECTED | COMPLETED
     # EVALUATED | EVALUATION_FAILED | DEACTIVATED | TERMINATED
     status: Mapped[str] = mapped_column(
         Text,
@@ -78,11 +78,41 @@ class InterviewSession(Base):
         default=0,
     )
 
-    # Auto-deactivation deadline
-    grace_period_expires_at: Mapped[datetime | None] = mapped_column(
+    # Opaque browser credential, separate from the one-time invitation token.
+    session_token: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        unique=True,
+    )
+    session_token_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,
     )
+
+    # All real LiveKit drops; the third one terminates the session.
+    disconnect_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # Reconnect windows that actually expired; successful recovery never increments it.
+    timeout_disconnect_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    last_disconnected_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    reconnect_deadline: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
+    # Prevents a stale replaced LiveKit job from disconnecting the new connection.
+    active_connection_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

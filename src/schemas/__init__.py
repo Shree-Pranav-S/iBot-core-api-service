@@ -16,7 +16,6 @@ from src.schemas.assessment import (
     JDAnalysisAndInterviewPlan,
     SkillPriority,
 )
-from src.schemas.audit import AuditEventPayload, AuditLogResponse
 from src.schemas.auth import (
     LoginRequest,
     RecruiterRegisterRequest,
@@ -42,8 +41,15 @@ from src.schemas.common import (
     HealthResponse,
     PaginatedResponse,
 )
+from src.schemas.event_log import (
+    EventLogCreate,
+    EventLogResponse,
+    EventName,
+    EventSource,
+)
 from src.schemas.notification import (
     NotificationLogResponse,
+    RecruiterDashboardNotification,
     SendInvitationPayload,
     SendOutcomePayload,
     SendReminderPayload,
@@ -79,12 +85,15 @@ __all__ = [
     "CandidateTokenValidationResponse",
     # notification
     "NotificationLogResponse",
+    "RecruiterDashboardNotification",
     "SendInvitationPayload",
     "SendReminderPayload",
     "SendOutcomePayload",
-    # audit
-    "AuditEventPayload",
-    "AuditLogResponse",
+    # event logs
+    "EventLogCreate",
+    "EventLogResponse",
+    "EventName",
+    "EventSource",
     # common
     "APIResponse",
     "PaginatedResponse",

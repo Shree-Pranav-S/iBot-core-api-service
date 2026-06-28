@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from typing import Any
 
+from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app, run_async
 from src.data.repositories.notification_log_repository import (
     NotificationLogRepository,
 )
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.utils.candidates import send_invitation_email
 
 logger = logging.getLogger(__name__)
@@ -51,11 +54,62 @@ async def _log_invitation_failure(
 )
 def send_invitation_email_task(self: Any, payload: dict[str, Any]) -> None:
     """Send and log one candidate invitation email."""
+
+    candidate_assessment_id = str(payload["candidate_assessment_id"])
+    task_id = str(self.request.id or candidate_assessment_id)
+    started_at = time.monotonic()
+    run_async(
+        try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.CELERY_TASK_STARTED,
+                source_service=EventSource.CORE_API,
+                correlation_id=task_id,
+                candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                metadata={
+                    "task_name": self.name,
+                    "retry_number": self.request.retries,
+                },
+            )
+        )
+    )
     try:
         run_async(_send_invitation(payload))
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_COMPLETED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                    },
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
     except Exception as exc:
         if self.request.retries < self.max_retries:
             countdown = min(60, 2**self.request.retries)
+            run_async(
+                try_record_event_in_background(
+                    EventLogCreate(
+                        event_name=EventName.CELERY_TASK_RETRYING,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=task_id,
+                        candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                        metadata={
+                            "task_name": self.name,
+                            "retry_number": self.request.retries,
+                            "retry_in_seconds": countdown,
+                            "exception_type": type(exc).__name__,
+                        },
+                        error_message=str(exc),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                )
+            )
             logger.exception(
                 "Invitation email task failed; retrying",
                 extra={
@@ -66,6 +120,23 @@ def send_invitation_email_task(self: Any, payload: dict[str, Any]) -> None:
             raise self.retry(exc=exc, countdown=countdown)
 
         error_message = f"{type(exc).__name__}: {exc}"
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_FAILED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "exception_type": type(exc).__name__,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
         logger.exception(
             "Invitation email task failed permanently",
             extra={"candidate_assessment_id": payload.get("candidate_assessment_id")},

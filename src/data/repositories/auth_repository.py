@@ -114,3 +114,16 @@ class AuthRepository:
         logger.info(
             "All refresh tokens revoked", extra={"recruiter_id": str(recruiter_id)}
         )
+
+    async def update_password(self, email: str, hashed_password: str) -> bool:
+        """Update the hashed password for a recruiter by email."""
+
+        statement = (
+            update(Recruiter)
+            .where(Recruiter.email == email)
+            .values(hashed_password=hashed_password)
+        )
+        result = await self._session.execute(statement)
+        if result.rowcount > 0:
+            logger.info("Password updated", extra={"email": email})
+        return result.rowcount > 0

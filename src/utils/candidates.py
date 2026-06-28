@@ -473,3 +473,99 @@ async def send_hiring_decision_email(
             "brevo_response": str(result),
         },
     )
+
+
+async def send_otp_email(recipient_email: str, otp: str) -> None:
+    """Send a password-reset OTP email via Brevo."""
+
+    def _build_otp_html(otp: str) -> str:
+        """Build a rich HTML email for the OTP verification."""
+        digits = list(otp)
+        digit_cells = "".join(
+            f'<td style="width:56px;height:64px;background:#f5f3ff;border:2px solid #ddd6fe;border-radius:12px;text-align:center;vertical-align:middle;font-size:28px;font-weight:800;color:#1e1b4b;letter-spacing:2px;">{d}</td>'
+            for d in digits
+        )
+        return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Password Reset OTP</title>
+    </head>
+    <body style="margin:0;padding:0;background-color:#f4f6fa;font-family:'Segoe UI',Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 0;">
+        <tr>
+          <td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+              <!-- Header -->
+              <tr>
+                <td style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);padding:36px 40px;text-align:center;">
+                  <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:-0.5px;">iBot AI Interview</h1>
+                  <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Password Reset Verification</p>
+                </td>
+              </tr>
+              <!-- Body -->
+              <tr>
+                <td style="padding:40px;">
+                  <p style="margin:0 0 8px;color:#6366f1;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Security Code</p>
+                  <h2 style="margin:0 0 20px;color:#1e1b4b;font-size:22px;font-weight:700;">Password Reset Request</h2>
+                  <p style="margin:0 0 28px;color:#4b5563;font-size:15px;line-height:1.7;">
+                    Use the verification code below to complete your password reset.
+                    This code will expire in <strong style="color:#1e1b4b;">60 seconds</strong>.
+                  </p>
+
+                  <!-- OTP Code -->
+                  <table cellpadding="0" cellspacing="8" style="margin:0 auto 28px;">
+                    <tr>
+                      {digit_cells}
+                    </tr>
+                  </table>
+
+                  <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:10px;padding:14px 18px;margin-bottom:28px;">
+                    <p style="margin:0;color:#92400e;font-size:13px;line-height:1.6;">
+                      <strong>⚠️ Important:</strong> If you did not request a password reset, please ignore this email.
+                      Your account remains secure.
+                    </p>
+                  </div>
+                </td>
+              </tr>
+              <!-- Footer -->
+              <tr>
+                <td style="background:#f9fafb;border-top:1px solid #f3f4f6;padding:24px 40px;text-align:center;">
+                  <p style="margin:0;color:#9ca3af;font-size:12px;">
+                    This email was sent by the iBot AI Interview Platform.<br/>
+                    Do not share this code with anyone.
+                  </p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+    """
+
+    client = AsyncBrevo(api_key=settings.BREVO_API_KEY)
+    sender = SendTransacEmailRequestSender(
+        email=settings.BREVO_SENDER_EMAIL,
+        name="iBot AI Interview Platform",
+    )
+    recipient = SendTransacEmailRequestToItem(
+        email=recipient_email,
+        name=recipient_email,
+    )
+    result = await client.transactional_emails.send_transac_email(
+        html_content=_build_otp_html(otp),
+        sender=sender,
+        subject="Password Reset OTP — iBot AI Interview",
+        to=[recipient],
+    )
+    logger.info(
+        "OTP email sent via Brevo",
+        extra={
+            "recipient": recipient_email,
+            "brevo_response": str(result),
+        },
+    )

@@ -202,26 +202,44 @@ class CandidateAssessmentRepository:
     @classmethod
     async def save_parsed_resume_success_in_background(
         cls, ca_record_id: uuid.UUID, parsed_data: dict
-    ) -> None:
+    ) -> dict[str, str] | None:
         from src.data.clients.postgres_client import get_session_factory
 
         SessionLocal = await get_session_factory()
         async with SessionLocal() as session:
             repo = cls(session)
             await repo.save_parsed_resume_success(ca_record_id, parsed_data)
+            context = await repo.get_by_id(ca_record_id)
             await session.commit()
+            if context is None:
+                return None
+            return {
+                "candidate_assessment_id": str(context.id),
+                "assessment_id": str(context.assessment_id),
+                "recruiter_id": str(context.assessment.recruiter_id),
+                "candidate_name": context.candidate.full_name,
+            }
 
     @classmethod
     async def save_parsed_resume_failed_in_background(
         cls, ca_record_id: uuid.UUID, error_msg: str
-    ) -> None:
+    ) -> dict[str, str] | None:
         from src.data.clients.postgres_client import get_session_factory
 
         SessionLocal = await get_session_factory()
         async with SessionLocal() as session:
             repo = cls(session)
             await repo.save_parsed_resume_failed(ca_record_id, error_msg)
+            context = await repo.get_by_id(ca_record_id)
             await session.commit()
+            if context is None:
+                return None
+            return {
+                "candidate_assessment_id": str(context.id),
+                "assessment_id": str(context.assessment_id),
+                "recruiter_id": str(context.assessment.recruiter_id),
+                "candidate_name": context.candidate.full_name,
+            }
 
     @classmethod
     async def get_candidate_emails_for_assessment_in_background(

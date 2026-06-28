@@ -196,7 +196,11 @@ def _normalize_interview_plan(
     """Build the final plan deterministically from JD priorities."""
 
     total_tenths = int(duration_mins * 10)
-    intro_tenths = 10
+
+    # Self-intro: min(10% of total duration, 1 minute)
+    intro_tenths = min(int(total_tenths * 0.10), 10)
+    intro_tenths = max(intro_tenths, 1)  # at least 0.1 min
+
     behavioural_tenths = int(duration_mins)
     technical_tenths = total_tenths - intro_tenths - behavioural_tenths
     if technical_tenths < 5:
@@ -220,7 +224,8 @@ def _normalize_interview_plan(
     if not unique_skills:
         raise ValueError("JD analysis returned no technical skills.")
 
-    maximum_skill_count = max(1, technical_tenths // 5)
+    # Cap at maximum 8 technical skills
+    maximum_skill_count = min(8, max(1, technical_tenths // 5))
     selected_skills = sorted(
         unique_skills,
         key=lambda item: (-item[2], item[0]),
@@ -230,12 +235,39 @@ def _normalize_interview_plan(
         technical_tenths,
     )
 
+    # Drop technical skills allocated <= 0.7 minutes (7 tenths) and
+    # redistribute their time among the remaining skills.
+    surviving: list[tuple[tuple[int, str, float], int]] = []
+    freed_tenths = 0
+    for skill_tuple, allocated_tenths in zip(selected_skills, allocations, strict=True):
+        if allocated_tenths <= 7:
+            freed_tenths += allocated_tenths
+        else:
+            surviving.append((skill_tuple, allocated_tenths))
+
+    if freed_tenths > 0 and surviving:
+        # Redistribute freed time proportionally by current allocation
+        total_surviving = sum(a for _, a in surviving)
+        redistributed: list[tuple[tuple[int, str, float], int]] = []
+        remaining_freed = freed_tenths
+        for i, (skill_tuple, alloc) in enumerate(surviving):
+            if i == len(surviving) - 1:
+                # Last skill gets whatever is left to avoid rounding drift
+                extra = remaining_freed
+            else:
+                extra = round(freed_tenths * alloc / total_surviving)
+                remaining_freed -= extra
+            redistributed.append((skill_tuple, alloc + extra))
+        surviving = redistributed
+
+    if not surviving:
+        raise ValueError(
+            "All technical skills were dropped due to insufficient time allocation. "
+            "Consider increasing the interview duration."
+        )
+
     technical_sections: list[TechnicalInterviewSection] = []
-    for (_, skill, _), allocated_tenths in zip(
-        selected_skills,
-        allocations,
-        strict=True,
-    ):
+    for (_, skill, _), allocated_tenths in surviving:
         technical_sections.append(
             TechnicalInterviewSection(
                 section_name=skill,
@@ -249,7 +281,7 @@ def _normalize_interview_plan(
         total_mins=duration_mins,
         inferred_difficulty=jd_analysis.inferred_difficulty,
         sections=[
-            SelfIntroSection(allocated_mins=1.0),
+            SelfIntroSection(allocated_mins=round(intro_tenths / 10.0, 1)),
             *technical_sections,
             BehaviouralCulturalSection(
                 allocated_mins=round(behavioural_tenths / 10.0, 1),
@@ -339,8 +371,8 @@ INTERVIEW PLAN — HARD RULES
   1. `self_intro`
   2. technical skill sections in descending effective importance
   3. `behavioural_cultural`
-- `self_intro` is always exactly 1.0 minute, has `skill: null`, and must NOT contain
-  `expected_signals`.
+- `self_intro` is capped at min(10 percent of total duration, 1.0 minute), has `skill: null`,
+  and must NOT contain `expected_signals`.
 - `behavioural_cultural` is always exactly 10 percent of total interview time.
   For 15 minutes it is exactly 1.5 minutes; for 30 minutes it is exactly 3.0.
 - Allocate every remaining minute to technical skills.

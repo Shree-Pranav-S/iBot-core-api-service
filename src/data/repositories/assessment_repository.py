@@ -4,7 +4,7 @@ import logging
 import uuid
 from collections.abc import Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.clients.postgres_client import register_after_commit_callback
@@ -24,6 +24,21 @@ class AssessmentRepository:
         statement = select(Assessment).where(Assessment.id == assessment_id)
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
+
+    async def check_role_name_exists(
+        self, recruiter_id: uuid.UUID, role_name: str
+    ) -> bool:
+        """Check if an assessment with the given role name already exists for this recruiter (case-insensitive)."""
+        statement = select(
+            select(Assessment)
+            .where(
+                Assessment.recruiter_id == recruiter_id,
+                func.lower(Assessment.role_name) == role_name.strip().lower(),
+            )
+            .exists()
+        )
+        result = await self._session.execute(statement)
+        return result.scalar() or False
 
     async def get_all_by_recruiter(self, recruiter_id: uuid.UUID) -> list[Assessment]:
         """Return all assessments owned by the specified recruiter, ordered by creation date descending."""

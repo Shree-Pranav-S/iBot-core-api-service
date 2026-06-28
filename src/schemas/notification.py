@@ -25,6 +25,20 @@ class NotificationLogResponse(ORMBaseModel):
     error_message: str | None
 
 
+class RecruiterDashboardNotification(AppBaseModel):
+    """Human-friendly report notification shown in the recruiter dashboard."""
+
+    id: uuid.UUID
+    candidate_assessment_id: uuid.UUID
+    notification_type: str
+    title: str
+    message: str
+    candidate_name: str
+    assessment_title: str
+    role_name: str
+    sent_at: datetime
+
+
 # ── Internal Celery task payloads ─────────────────────────────────────────────
 # These are not exposed via HTTP — they are used as typed dicts
 # passed to Celery task arguments.

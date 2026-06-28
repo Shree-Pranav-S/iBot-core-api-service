@@ -19,7 +19,6 @@ from src.data.models.postgres.mixins import TimestampMixin
 if TYPE_CHECKING:
     from src.data.models.postgres.assessment import Assessment
     from src.data.models.postgres.candidate import Candidate
-    from src.data.models.postgres.csv_upload_log import CSVUploadLog
 
 
 class Recruiter(TimestampMixin, Base):
@@ -43,9 +42,6 @@ class Recruiter(TimestampMixin, Base):
     )
     candidates: Mapped[list["Candidate"]] = relationship(
         back_populates="created_by_recruiter",
-    )
-    csv_upload_logs: Mapped[list["CSVUploadLog"]] = relationship(
-        back_populates="recruiter",
     )
 
     def __repr__(self) -> str:

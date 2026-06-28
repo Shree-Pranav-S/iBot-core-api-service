@@ -13,9 +13,11 @@ from src.core.exceptions import (
     ForbiddenException,
     NotFoundException,
 )
+from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import FocusAreaOverride
+from src.schemas.realtime import RecruiterEventType
 from src.utils.assessment_utils import (
     parse_pdf_jd,
     run_jd_analysis_and_interview_plan,
@@ -113,13 +115,18 @@ class AssessmentService:
                 "Either job description text or a PDF file must be provided."
             )
 
-        # Save to Database with status="PROCESSING"
+        # Check for role name uniqueness
+        if await self._repository.check_role_name_exists(recruiter_id, role_name):
+            raise BadRequestException(
+                f"An assessment with the role name '{role_name}' already exists. Please choose a different role name."
+            )
+
         db_assessment = Assessment(
             recruiter_id=recruiter_id,
             title=title,
             role_name=role_name,
-            jd_text=jd_text if jd_text else "",  # initial empty or text
-            jd_file_path=jd_filename,  # store file name/metadata
+            jd_text=jd_text if jd_text else "",
+            jd_file_path=jd_filename,
             jd_analysis=None,
             focus_areas=[fa.model_dump() for fa in focus_areas]
             if focus_areas
@@ -128,7 +135,7 @@ class AssessmentService:
             interview_duration_mins=duration_mins,
             window_start=window_start,
             window_end=window_end,
-            status="PROCESSING",  # Default to PROCESSING for async flow
+            status="PROCESSING",
         )
 
         assessment = await self._repository.create_assessment(db_assessment)
@@ -152,6 +159,7 @@ class AssessmentService:
         focus_areas: list[FocusAreaOverride] | None = None,
     ) -> None:
         """Background task to parse PDF, run LLM analysis, generate plan, and activate assessment."""
+        assessment: Assessment | None = None
         try:
             assessment = await self._repository.get_by_id(assessment_id)
             if not assessment:
@@ -187,6 +195,16 @@ class AssessmentService:
                 jd_analysis=jd_analysis.model_dump(),
                 interview_plan=interview_plan.model_dump(),
             )
+            await publish_recruiter_event(
+                recruiter_id=assessment.recruiter_id,
+                event_type=RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED,
+                payload={
+                    "assessment_id": str(assessment.id),
+                    "title": assessment.title,
+                    "role_name": assessment.role_name,
+                    "status": "ACTIVE",
+                },
+            )
             logger.info(
                 "Successfully processed assessment %s asynchronously.", assessment_id
             )
@@ -203,6 +221,17 @@ class AssessmentService:
                 await AssessmentRepository.close_assessment_on_failure_in_background(
                     assessment_id
                 )
+                if assessment is not None:
+                    await publish_recruiter_event(
+                        recruiter_id=assessment.recruiter_id,
+                        event_type=(RecruiterEventType.ASSESSMENT_PROCESSING_FAILED),
+                        payload={
+                            "assessment_id": str(assessment.id),
+                            "title": assessment.title,
+                            "role_name": assessment.role_name,
+                            "status": "CLOSED",
+                        },
+                    )
             except Exception:
                 logger.exception(
                     "Failed to update status to CLOSED after error on assessment %s",

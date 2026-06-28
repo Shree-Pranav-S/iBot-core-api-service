@@ -13,18 +13,21 @@ from src.core.exceptions import (
     ForbiddenException,
     NotFoundException,
 )
+from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
-from src.data.repositories.csv_upload_log_repository import CSVUploadLogRepository
+from src.data.repositories.event_logs_repository import EventLogsRepository
 from src.data.repositories.notification_log_repository import (
     NotificationLogRepository,
 )
 from src.handlers.celery_tasks.notification_tasks import enqueue_invitation_email
 from src.schemas.candidate import BulkUploadResponse, CSVRowResult
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
+from src.schemas.realtime import RecruiterEventType
 from src.utils.candidates import (
     download_resume,
     parse_resume_from_file,
@@ -45,12 +48,12 @@ class CandidateService:
         candidate_repo: CandidateRepository,
         ca_repo: CandidateAssessmentRepository,
         assessment_repo: AssessmentRepository,
-        upload_log_repo: CSVUploadLogRepository,
+        event_logs_repo: EventLogsRepository,
     ) -> None:
         self._candidate_repo = candidate_repo
         self._ca_repo = ca_repo
         self._assessment_repo = assessment_repo
-        self._upload_log_repo = upload_log_repo
+        self._event_logs_repo = event_logs_repo
 
     async def get_candidates_for_assessment(
         self, assessment_id: uuid.UUID, recruiter_id: uuid.UUID
@@ -105,21 +108,13 @@ class CandidateService:
             a.role_name.strip().lower(): a for a in all_assessments
         }
 
-        # Create the upload log record immediately
         total_rows = len(rows)
-        # Use the first matching assessment for the log (or a placeholder UUID)
-        # We defer associating to assessment_id until we know the overall dominant one.
-        # For simplicity, use a sentinel and update per-row.
-        # We'll use recruiter's first assessment for the log, or handle per-row.
-        # Since CSV can have multiple roles, we'll use None and handle below.
-        # Actually: create one log per CSV upload - use assessment_id from first successful row.
-
+        upload_id = uuid.uuid4()
         row_results: list[CSVRowResult] = []
+        failure_events: list[EventLogCreate] = []
         successful_rows = 0
         failed_rows = 0
 
-        # We collect which assessment_id to use for the log after processing.
-        dominant_assessment_id: uuid.UUID | None = None
         processed_ca_records: list[tuple[CandidateAssessment, object, str, str]] = []
 
         for row_idx, raw_row in enumerate(rows, start=1):
@@ -134,12 +129,28 @@ class CandidateService:
             role = row.get("role", "")
 
             if not email or not name or not role:
-                row_results.append(
-                    CSVRowResult(
-                        row=row_idx,
-                        email=email or "(empty)",
-                        status="failed",
-                        reason="Missing required fields: name, email, or role.",
+                reason = "Missing required fields: name, email, or role."
+                result = CSVRowResult(
+                    row=row_idx,
+                    email=email or "(empty)",
+                    status="failed",
+                    reason=reason,
+                )
+                row_results.append(result)
+                failure_events.append(
+                    EventLogCreate(
+                        event_name=EventName.CSV_ROW_FAILED,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=str(upload_id),
+                        recruiter_id=recruiter_id,
+                        metadata={
+                            "filename": filename,
+                            "row_number": row_idx,
+                            "email": result.email,
+                            "role": role,
+                            "reason_code": "MISSING_REQUIRED_FIELDS",
+                        },
+                        error_message=reason,
                     )
                 )
                 failed_rows += 1
@@ -148,15 +159,32 @@ class CandidateService:
             # Role matching
             matched_assessment = role_assessment_map.get(role.lower())
             if matched_assessment is None:
+                reason = (
+                    f"No assessment found for role '{role}'. "
+                    "Ensure an assessment with this role name exists and is active."
+                )
                 row_results.append(
                     CSVRowResult(
                         row=row_idx,
                         email=email,
                         status="failed",
-                        reason=(
-                            f"No assessment found for role '{role}'. "
-                            "Ensure an assessment with this role name exists and is active."
-                        ),
+                        reason=reason,
+                    )
+                )
+                failure_events.append(
+                    EventLogCreate(
+                        event_name=EventName.CSV_ROW_FAILED,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=str(upload_id),
+                        recruiter_id=recruiter_id,
+                        metadata={
+                            "filename": filename,
+                            "row_number": row_idx,
+                            "email": email,
+                            "role": role,
+                            "reason_code": "ASSESSMENT_NOT_FOUND",
+                        },
+                        error_message=reason,
                     )
                 )
                 failed_rows += 1
@@ -182,12 +210,29 @@ class CandidateService:
                     candidate.id, matched_assessment.id
                 )
                 if existing_ca is not None:
+                    reason = "Candidate is already registered for this assessment."
                     row_results.append(
                         CSVRowResult(
                             row=row_idx,
                             email=email,
                             status="failed",
-                            reason="Candidate is already registered for this assessment.",
+                            reason=reason,
+                        )
+                    )
+                    failure_events.append(
+                        EventLogCreate(
+                            event_name=EventName.CSV_ROW_FAILED,
+                            source_service=EventSource.CORE_API,
+                            correlation_id=str(upload_id),
+                            recruiter_id=recruiter_id,
+                            metadata={
+                                "filename": filename,
+                                "row_number": row_idx,
+                                "email": email,
+                                "role": role,
+                                "reason_code": "CANDIDATE_ALREADY_REGISTERED",
+                            },
+                            error_message=reason,
                         )
                     )
                     failed_rows += 1
@@ -198,9 +243,6 @@ class CandidateService:
                     assessment_id=matched_assessment.id,
                     resume_file_path=resume_placeholder,
                 )
-
-                if dominant_assessment_id is None:
-                    dominant_assessment_id = matched_assessment.id
 
                 processed_ca_records.append(
                     (ca_record, matched_assessment, name, email)
@@ -220,42 +262,36 @@ class CandidateService:
                 logger.exception(
                     "Failed to process CSV row %d for email %s", row_idx, email
                 )
+                reason = "The row could not be processed because of an internal error."
                 row_results.append(
                     CSVRowResult(
                         row=row_idx,
                         email=email,
                         status="failed",
-                        reason=f"Internal error: {exc}",
+                        reason=reason,
+                    )
+                )
+                failure_events.append(
+                    EventLogCreate(
+                        event_name=EventName.CSV_ROW_FAILED,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=str(upload_id),
+                        recruiter_id=recruiter_id,
+                        metadata={
+                            "filename": filename,
+                            "row_number": row_idx,
+                            "email": email,
+                            "role": role,
+                            "reason_code": "ROW_PROCESSING_FAILED",
+                            "exception_type": type(exc).__name__,
+                        },
+                        error_message=reason,
                     )
                 )
                 failed_rows += 1
 
-        #  Create the CSV upload log
-        # Use dominant assessment id or fall back to the first available assessment
-        log_assessment_id = dominant_assessment_id or (
-            all_assessments[0].id if all_assessments else None
-        )
-
-        upload_log = None
-        if log_assessment_id is not None:
-            overall_status = (
-                "COMPLETED"
-                if failed_rows == 0
-                else (
-                    "COMPLETED_WITH_ERRORS"
-                    if successful_rows > 0
-                    else "COMPLETED_WITH_ERRORS"
-                )
-            )
-            upload_log = await self._upload_log_repo.create(
-                recruiter_id=recruiter_id,
-                assessment_id=log_assessment_id,
-                total_rows=total_rows,
-                successful_rows=successful_rows,
-                failed_rows=failed_rows,
-                row_results=[r.model_dump() for r in row_results],
-                overall_status=overall_status,
-            )
+        await self._event_logs_repo.create_many(failure_events)
+        overall_status = "COMPLETED" if failed_rows == 0 else "COMPLETED_WITH_ERRORS"
 
         # Queue post-commit work so workers only see durable candidate rows.
         for (
@@ -304,14 +340,12 @@ class CandidateService:
                 self._ca_repo.register_after_commit_callback(_trigger_resume)
 
         return BulkUploadResponse(
-            upload_id=upload_log.id if upload_log else uuid.uuid4(),
+            upload_id=upload_id,
             total_rows=total_rows,
             successful_rows=successful_rows,
             failed_rows=failed_rows,
             row_results=row_results,
-            overall_status=upload_log.overall_status
-            if upload_log
-            else "COMPLETED_WITH_ERRORS",
+            overall_status=overall_status,
         )
 
     async def create_single_candidate(
@@ -482,20 +516,41 @@ class CandidateService:
 
             resume_parsed = await parse_resume_from_file(temp_file_path)
 
-            await (
+            realtime_context = await (
                 CandidateAssessmentRepository.save_parsed_resume_success_in_background(
                     ca_record_id, resume_parsed
                 )
             )
+            if realtime_context:
+                await publish_recruiter_event(
+                    recruiter_id=realtime_context["recruiter_id"],
+                    event_type=RecruiterEventType.RESUME_PARSING_COMPLETED,
+                    payload={
+                        **realtime_context,
+                        "resume_parse_status": "COMPLETED",
+                    },
+                )
 
         except Exception as exc:
             logger.exception("Failed to parse resume for ca_record %s", ca_record_id)
             try:
-                await CandidateAssessmentRepository.save_parsed_resume_failed_in_background(
+                realtime_context = await CandidateAssessmentRepository.save_parsed_resume_failed_in_background(
                     ca_record_id, str(exc)
                 )
+                if realtime_context:
+                    await publish_recruiter_event(
+                        recruiter_id=realtime_context["recruiter_id"],
+                        event_type=RecruiterEventType.RESUME_PARSING_FAILED,
+                        payload={
+                            **realtime_context,
+                            "resume_parse_status": "FAILED",
+                        },
+                    )
             except Exception:
-                pass
+                logger.exception(
+                    "Could not persist failed resume parsing state for %s",
+                    ca_record_id,
+                )
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
                 try:

@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -74,8 +74,18 @@ class CandidateAssessment(TimestampMixin, Base):
         default=uuid.uuid4,
         server_default=func.gen_random_uuid(),
     )
+    invite_consumed: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    invite_consumed_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=True,
+    )
 
-    # INVITED | WAITING_ROOM | IN_PROGRESS | COMPLETED | EVALUATED
+    # INVITED | WAITING_ROOM | IN_PROGRESS | COMPLETED | EVALUATED | TERMINATED
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="INVITED", index=True
     )

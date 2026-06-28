@@ -12,6 +12,8 @@ from src.api.rest.routes.candidates import router as candidates_router
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.internal import router as internal_router
 from src.api.rest.routes.interview import router as interview_router
+from src.api.rest.routes.notifications import router as notifications_router
+from src.api.rest.routes.realtime import router as realtime_router
 from src.config.settings import settings
 from src.data.clients.postgres_client import close_db, init_db
 from src.data.clients.redis_client import close_redis, init_redis
@@ -40,6 +42,8 @@ def create_app() -> FastAPI:
     app.include_router(candidates_router)
     app.include_router(internal_router)
     app.include_router(interview_router)
+    app.include_router(notifications_router)
+    app.include_router(realtime_router)
     return app
 
 

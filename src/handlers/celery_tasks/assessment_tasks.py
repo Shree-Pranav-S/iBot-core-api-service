@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 import uuid
 from typing import Any
 
 from src.core.services.assessment_service import AssessmentService
+from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app, run_async
 from src.data.clients.postgres_client import get_session_factory
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import FocusAreaOverride
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,23 @@ def process_assessment_task(
     focus_areas_payload: list[dict[str, Any]] | None,
 ) -> None:
     """Generate JD analysis and interview plan for an assessment."""
+
+    task_id = str(self.request.id or assessment_id)
+    started_at = time.monotonic()
+    run_async(
+        try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.CELERY_TASK_STARTED,
+                source_service=EventSource.CORE_API,
+                correlation_id=task_id,
+                metadata={
+                    "task_name": self.name,
+                    "retry_number": self.request.retries,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    )
     try:
         run_async(
             _process_assessment(
@@ -71,12 +91,52 @@ def process_assessment_task(
                 focus_areas_payload,
             )
         )
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_COMPLETED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "assessment_id": assessment_id,
+                    },
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
     except Exception as exc:
         countdown = min(60, 2**self.request.retries)
+        exhausted = self.request.retries >= int(self.max_retries or 0)
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=(
+                        EventName.CELERY_TASK_FAILED
+                        if exhausted
+                        else EventName.CELERY_TASK_RETRYING
+                    ),
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "assessment_id": assessment_id,
+                        "retry_in_seconds": None if exhausted else countdown,
+                        "exception_type": type(exc).__name__,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
         logger.exception(
             "Celery assessment processing failed",
             extra={"assessment_id": assessment_id, "retry_in": countdown},
         )
+        if exhausted:
+            raise
         raise self.retry(exc=exc, countdown=countdown)
 
 

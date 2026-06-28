@@ -1,30 +1,48 @@
 """Business logic for recruiter authentication."""
 
 import hashlib
+import json
 import logging
+import random
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from src.core.exceptions import AuthenticationException, ConflictException
+from redis.asyncio import Redis
+
+from src.core.exceptions import (
+    AuthenticationException,
+    BadRequestException,
+    ConflictException,
+    NotFoundException,
+)
+from src.core.services.event_log_service import try_record_event_in_background
 from src.data.models.postgres.recruiter import Recruiter
 from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     RecruiterRegisterRequest,
+    ResendOTPRequest,
     TokenRefreshRequest,
     TokenResponse,
+    VerifyOTPRequest,
 )
+from src.schemas.event_log import EventLogCreate, EventName, EventSource
+from src.utils.candidates import send_otp_email
 from src.utils.security import create_access_token, hash_password, verify_password
 
 logger = logging.getLogger(__name__)
+
+OTP_TTL_SECONDS = 60
 
 
 class AuthService:
     """Service layer for recruiter registration and login use cases."""
 
-    def __init__(self, repository: AuthRepository) -> None:
+    def __init__(self, repository: AuthRepository, redis: Redis | None = None) -> None:
         self._repository = repository
+        self._redis = redis
 
     async def register_recruiter(
         self,
@@ -174,3 +192,113 @@ class AuthService:
             logger.info("Recruiter logged out successfully")
         else:
             logger.warning("Logout attempted with invalid token hash")
+
+    # ── Forgot-password flow ──────────────────────────────────────────────────
+
+    async def initiate_password_reset(self, payload: ForgotPasswordRequest) -> None:
+        """Generate a 4-digit OTP, store in Redis, and send via email."""
+
+        if self._redis is None:
+            raise BadRequestException("Password reset service is unavailable.")
+
+        normalized_email = payload.email.lower()
+        recruiter = await self._repository.get_recruiter_by_email(normalized_email)
+        if recruiter is None:
+            raise NotFoundException("No account found with this email address.")
+
+        if not recruiter.is_active:
+            raise BadRequestException("This account is inactive.")
+
+        otp = str(random.randint(1000, 9999))
+        otp_data = json.dumps(
+            {
+                "otp": otp,
+                "new_password_hash": hash_password(payload.new_password),
+            }
+        )
+        redis_key = f"otp:{normalized_email}"
+        await self._redis.set(redis_key, otp_data, ex=OTP_TTL_SECONDS)
+
+        await send_otp_email(recipient_email=normalized_email, otp=otp)
+        logger.info("Password reset OTP sent", extra={"email": normalized_email})
+
+    async def verify_otp(self, payload: VerifyOTPRequest) -> None:
+        """Verify the OTP and update the recruiter password."""
+
+        if self._redis is None:
+            raise BadRequestException("Password reset service is unavailable.")
+
+        normalized_email = payload.email.lower()
+        redis_key = f"otp:{normalized_email}"
+        stored_data = await self._redis.get(redis_key)
+
+        if stored_data is None:
+            raise BadRequestException("OTP expired or not requested.")
+
+        otp_record = json.loads(stored_data)
+        if otp_record["otp"] != payload.otp:
+            raise BadRequestException("Invalid OTP.")
+
+        # Update password in database
+        updated = await self._repository.update_password(
+            email=normalized_email,
+            hashed_password=otp_record["new_password_hash"],
+        )
+        if not updated:
+            raise NotFoundException("Recruiter account not found.")
+
+        # Clean up OTP from Redis
+        await self._redis.delete(redis_key)
+
+        # Revoke all existing sessions for security
+        recruiter = await self._repository.get_recruiter_by_email(normalized_email)
+        if recruiter:
+            await self._repository.revoke_all_recruiter_tokens(recruiter.id)
+
+            # Log the password reset event
+            await try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.PASSWORD_RESETED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=str(recruiter.id),
+                    recruiter_id=recruiter.id,
+                    metadata={"email": normalized_email},
+                )
+            )
+
+        logger.info("Password reset completed", extra={"email": normalized_email})
+
+    async def resend_otp(self, payload: ResendOTPRequest) -> None:
+        """Resend the OTP if the previous one has expired."""
+
+        if self._redis is None:
+            raise BadRequestException("Password reset service is unavailable.")
+
+        normalized_email = payload.email.lower()
+        redis_key = f"otp:{normalized_email}"
+
+        # Check if an OTP is still active
+        existing = await self._redis.get(redis_key)
+        if existing is not None:
+            raise BadRequestException(
+                "Please wait for the current OTP to expire before requesting a new one."
+            )
+
+        recruiter = await self._repository.get_recruiter_by_email(normalized_email)
+        if recruiter is None:
+            raise NotFoundException("No account found with this email address.")
+
+        if not recruiter.is_active:
+            raise BadRequestException("This account is inactive.")
+
+        otp = str(random.randint(1000, 9999))
+        otp_data = json.dumps(
+            {
+                "otp": otp,
+                "new_password_hash": hash_password(payload.new_password),
+            }
+        )
+        await self._redis.set(redis_key, otp_data, ex=OTP_TTL_SECONDS)
+
+        await send_otp_email(recipient_email=normalized_email, otp=otp)
+        logger.info("Password reset OTP resent", extra={"email": normalized_email})

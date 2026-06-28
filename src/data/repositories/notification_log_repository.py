@@ -3,8 +3,12 @@
 import logging
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.data.models.postgres.assessment import Assessment
+from src.data.models.postgres.candidate import Candidate
+from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.models.postgres.notification_log import NotificationLog
 
 logger = logging.getLogger(__name__)
@@ -15,6 +19,38 @@ class NotificationLogRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_report_ready_for_recruiter(
+        self,
+        recruiter_id: uuid.UUID,
+        *,
+        limit: int = 30,
+    ) -> list[tuple[NotificationLog, str, str, str]]:
+        """Return recent persisted report-ready notifications owned by a recruiter."""
+
+        statement = (
+            select(
+                NotificationLog,
+                Candidate.full_name,
+                Assessment.title,
+                Assessment.role_name,
+            )
+            .join(
+                CandidateAssessment,
+                CandidateAssessment.id == NotificationLog.candidate_assessment_id,
+            )
+            .join(Candidate, Candidate.id == CandidateAssessment.candidate_id)
+            .join(Assessment, Assessment.id == CandidateAssessment.assessment_id)
+            .where(
+                Assessment.recruiter_id == recruiter_id,
+                NotificationLog.notification_type == "REPORT_READY",
+                NotificationLog.delivery_status == "SENT",
+            )
+            .order_by(NotificationLog.sent_at.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(statement)
+        return [(row[0], str(row[1]), str(row[2]), str(row[3])) for row in result.all()]
 
     async def create(
         self,

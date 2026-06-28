@@ -9,11 +9,10 @@ Import all models here so that:
 """
 
 from src.data.models.postgres.assessment import Assessment
-from src.data.models.postgres.audit_log import AuditLog
 from src.data.models.postgres.base import Base
 from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
-from src.data.models.postgres.csv_upload_log import CSVUploadLog
+from src.data.models.postgres.event_log import EventLog
 from src.data.models.postgres.interview_evaluation import InterviewEvaluation
 from src.data.models.postgres.interview_session import InterviewSession
 from src.data.models.postgres.mixins import TimestampMixin
@@ -29,9 +28,8 @@ __all__ = [
     "Candidate",
     "Assessment",
     "CandidateAssessment",
-    "CSVUploadLog",
+    "EventLog",
     "NotificationLog",
-    "AuditLog",
     "InterviewSession",
     "InterviewEvaluation",
 ]

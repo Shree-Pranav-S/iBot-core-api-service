@@ -21,7 +21,6 @@ from src.data.models.postgres.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from src.data.models.postgres.candidate_assessment import CandidateAssessment
-    from src.data.models.postgres.csv_upload_log import CSVUploadLog
     from src.data.models.postgres.recruiter import Recruiter
 
 
@@ -72,9 +71,6 @@ class Assessment(TimestampMixin, Base):
     candidate_assessments: Mapped[list["CandidateAssessment"]] = relationship(
         back_populates="assessment",
         cascade="all, delete-orphan",
-    )
-    csv_upload_logs: Mapped[list["CSVUploadLog"]] = relationship(
-        back_populates="assessment",
     )
 
     def __repr__(self) -> str:

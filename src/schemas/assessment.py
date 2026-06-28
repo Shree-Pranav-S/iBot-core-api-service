@@ -66,7 +66,7 @@ class SelfIntroSection(AppBaseModel):
     )
     allocated_mins: float = Field(
         default=1.0,
-        description="Self intro is deterministically normalized to 1 minute",
+        description="Self intro is capped at min(10% of total duration, 1 minute)",
     )
 
 

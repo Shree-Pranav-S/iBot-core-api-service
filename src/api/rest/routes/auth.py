@@ -3,6 +3,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Request, status
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import get_db_session
@@ -12,14 +13,18 @@ from src.core.exceptions import (
     NotFoundException,
 )
 from src.core.services.auth_service import AuthService
+from src.data.clients.redis_client import get_async_redis
 from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     RecruiterRegisterRequest,
     RecruiterResponse,
+    ResendOTPRequest,
     TokenRefreshRequest,
     TokenResponse,
+    VerifyOTPRequest,
 )
 from src.schemas.common import APIResponse
 
@@ -28,10 +33,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 def get_auth_service(
     session: AsyncSession = Depends(get_db_session),
+    redis: Redis = Depends(get_async_redis),
 ) -> AuthService:
     """Build the auth service from request-scoped dependencies."""
 
-    return AuthService(AuthRepository(session))
+    return AuthService(AuthRepository(session), redis=redis)
 
 
 @router.post(
@@ -150,3 +156,54 @@ async def logout_recruiter(
 
     await service.logout(payload)
     return APIResponse(message="Logged out successfully.", data=None)
+
+
+# ── Forgot-password endpoints ────────────────────────────────────────────────
+
+
+@router.post(
+    "/forgot-password",
+    response_model=APIResponse[None],
+    summary="Initiate password reset",
+    description="Generate a 4-digit OTP and send it to the recruiter's email.",
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    service: AuthService = Depends(get_auth_service),
+) -> APIResponse[None]:
+    """Send a password-reset OTP to the recruiter's email."""
+
+    await service.initiate_password_reset(payload)
+    return APIResponse(message="OTP sent to your email.", data=None)
+
+
+@router.post(
+    "/verify-otp",
+    response_model=APIResponse[None],
+    summary="Verify OTP and reset password",
+    description="Verify the 4-digit OTP and update the recruiter's password.",
+)
+async def verify_otp(
+    payload: VerifyOTPRequest,
+    service: AuthService = Depends(get_auth_service),
+) -> APIResponse[None]:
+    """Verify the OTP and update the password."""
+
+    await service.verify_otp(payload)
+    return APIResponse(message="Password updated successfully.", data=None)
+
+
+@router.post(
+    "/resend-otp",
+    response_model=APIResponse[None],
+    summary="Resend password reset OTP",
+    description="Resend the 4-digit OTP if the previous one has expired.",
+)
+async def resend_otp(
+    payload: ResendOTPRequest,
+    service: AuthService = Depends(get_auth_service),
+) -> APIResponse[None]:
+    """Resend the password-reset OTP."""
+
+    await service.resend_otp(payload)
+    return APIResponse(message="OTP resent to your email.", data=None)

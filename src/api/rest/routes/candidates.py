@@ -22,8 +22,8 @@ from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
-from src.data.repositories.csv_upload_log_repository import CSVUploadLogRepository
 from src.data.repositories.evaluation_repository import EvaluationRepository
+from src.data.repositories.event_logs_repository import EventLogsRepository
 from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
@@ -49,7 +49,7 @@ def get_candidate_service(
         candidate_repo=CandidateRepository(session),
         ca_repo=CandidateAssessmentRepository(session),
         assessment_repo=AssessmentRepository(session),
-        upload_log_repo=CSVUploadLogRepository(session),
+        event_logs_repo=EventLogsRepository(session),
     )
 
 
