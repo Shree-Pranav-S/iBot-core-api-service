@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     BREVO_API_KEY: str = Field(default="")
     BREVO_SENDER_EMAIL: str = Field(default="shreepranav067@gmail.com")
     FRONTEND_URL: str = Field(default="http://localhost:5173")
+    TEMP_RESUME_DIR: str = Field(default="/tmp/ibot/resumes")
 
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432

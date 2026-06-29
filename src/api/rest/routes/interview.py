@@ -4,14 +4,9 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from src.api.rest.dependencies import get_db_session
+from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
 from src.core.exceptions import NotFoundException
-from src.data.models.postgres.assessment import Assessment
-from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.schemas.candidate import TokenValidationResponse
 from src.schemas.common import APIResponse
 
@@ -27,22 +22,10 @@ logger = logging.getLogger(__name__)
 )
 async def validate_token(
     token: uuid.UUID,
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
 ) -> APIResponse[TokenValidationResponse]:
     """Validate candidate's token and return details for the waiting room."""
-    # Query candidate assessment, eager loading candidate and assessment
-    stmt = (
-        select(CandidateAssessment)
-        .options(
-            selectinload(CandidateAssessment.candidate),
-            selectinload(CandidateAssessment.assessment).selectinload(
-                Assessment.recruiter
-            ),
-        )
-        .where(CandidateAssessment.invitation_token == token)
-    )
-    result = await session.execute(stmt)
-    ca = result.scalar_one_or_none()
+    ca = await unit_of_work.candidate_assessments.get_invitation_context(token)
 
     if ca is None:
         raise NotFoundException("Candidate invitation token not found.")

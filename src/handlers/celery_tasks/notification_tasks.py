@@ -9,9 +9,7 @@ from typing import Any
 
 from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app, run_async
-from src.data.repositories.notification_log_repository import (
-    NotificationLogRepository,
-)
+from src.data.repositories.unit_of_work import UnitOfWork
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.utils.candidates import send_invitation_email
 
@@ -30,21 +28,22 @@ async def _send_invitation(payload: dict[str, Any]) -> None:
         invitation_link=str(payload["invitation_link"]),
         interview_duration_mins=int(payload["interview_duration_mins"]),
     )
-    await NotificationLogRepository.log_invitation_sent_in_background(
-        ca_record_id,
-        recipient_email,
-    )
+    async with UnitOfWork() as unit_of_work:
+        await unit_of_work.notifications.log_invitation_sent(
+            ca_record_id, recipient_email
+        )
 
 
 async def _log_invitation_failure(
     payload: dict[str, Any],
     error_message: str,
 ) -> None:
-    await NotificationLogRepository.log_invitation_failed_in_background(
-        uuid.UUID(str(payload["candidate_assessment_id"])),
-        str(payload["recipient_email"]),
-        error_message,
-    )
+    async with UnitOfWork() as unit_of_work:
+        await unit_of_work.notifications.log_invitation_failed(
+            uuid.UUID(str(payload["candidate_assessment_id"])),
+            str(payload["recipient_email"]),
+            error_message,
+        )
 
 
 @celery_app.task(  # type: ignore

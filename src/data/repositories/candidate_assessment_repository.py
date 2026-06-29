@@ -1,6 +1,5 @@
 """Repository for candidate assessment data access."""
 
-import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -27,6 +26,25 @@ class CandidateAssessmentRepository:
         """Return a CandidateAssessment row matching the invitation token."""
         statement = select(CandidateAssessment).where(
             CandidateAssessment.invitation_token == token
+        )
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def get_invitation_context(
+        self, token: uuid.UUID
+    ) -> CandidateAssessment | None:
+        """Return invitation context with candidate, assessment, and recruiter loaded."""
+        from src.data.models.postgres.assessment import Assessment
+
+        statement = (
+            select(CandidateAssessment)
+            .options(
+                selectinload(CandidateAssessment.candidate),
+                selectinload(CandidateAssessment.assessment).selectinload(
+                    Assessment.recruiter
+                ),
+            )
+            .where(CandidateAssessment.invitation_token == token)
         )
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
@@ -113,17 +131,10 @@ class CandidateAssessmentRepository:
     async def update_resume_parsing_result(
         self, ca_id: uuid.UUID, status: str, parsed_data: dict
     ) -> None:
-        """Update the resume parsing status and results, with retry logic for async availability."""
-        ca_record = None
-        for _attempt in range(5):
-            statement = select(CandidateAssessment).where(
-                CandidateAssessment.id == ca_id
-            )
-            result = await self._session.execute(statement)
-            ca_record = result.scalar_one_or_none()
-            if ca_record:
-                break
-            await asyncio.sleep(0.5)
+        """Update resume parsing status and results."""
+        statement = select(CandidateAssessment).where(CandidateAssessment.id == ca_id)
+        result = await self._session.execute(statement)
+        ca_record = result.scalar_one_or_none()
 
         if ca_record:
             ca_record.resume_parse_status = status
@@ -199,71 +210,16 @@ class CandidateAssessmentRepository:
         await self._session.delete(ca)
         await self._session.flush()
 
-    @classmethod
-    async def save_parsed_resume_success_in_background(
-        cls, ca_record_id: uuid.UUID, parsed_data: dict
+    async def get_realtime_context(
+        self, ca_record_id: uuid.UUID
     ) -> dict[str, str] | None:
-        from src.data.clients.postgres_client import get_session_factory
-
-        SessionLocal = await get_session_factory()
-        async with SessionLocal() as session:
-            repo = cls(session)
-            await repo.save_parsed_resume_success(ca_record_id, parsed_data)
-            context = await repo.get_by_id(ca_record_id)
-            await session.commit()
-            if context is None:
-                return None
-            return {
-                "candidate_assessment_id": str(context.id),
-                "assessment_id": str(context.assessment_id),
-                "recruiter_id": str(context.assessment.recruiter_id),
-                "candidate_name": context.candidate.full_name,
-            }
-
-    @classmethod
-    async def save_parsed_resume_failed_in_background(
-        cls, ca_record_id: uuid.UUID, error_msg: str
-    ) -> dict[str, str] | None:
-        from src.data.clients.postgres_client import get_session_factory
-
-        SessionLocal = await get_session_factory()
-        async with SessionLocal() as session:
-            repo = cls(session)
-            await repo.save_parsed_resume_failed(ca_record_id, error_msg)
-            context = await repo.get_by_id(ca_record_id)
-            await session.commit()
-            if context is None:
-                return None
-            return {
-                "candidate_assessment_id": str(context.id),
-                "assessment_id": str(context.assessment_id),
-                "recruiter_id": str(context.assessment.recruiter_id),
-                "candidate_name": context.candidate.full_name,
-            }
-
-    @classmethod
-    async def get_candidate_emails_for_assessment_in_background(
-        cls, assessment_id: uuid.UUID
-    ) -> list[dict]:
-        from src.data.clients.postgres_client import get_session_factory
-
-        SessionLocal = await get_session_factory()
-        async with SessionLocal() as session:
-            repo = cls(session)
-            ca_records = await repo.get_all_by_assessment(assessment_id)
-            results = []
-            for ca in ca_records:
-                if ca.candidate and ca.candidate.email:
-                    results.append(
-                        {
-                            "candidate_name": ca.candidate.full_name,
-                            "recipient_email": ca.candidate.email,
-                            "assessment_title": ca.assessment.title
-                            if ca.assessment
-                            else "",
-                            "role_name": ca.assessment.role_name
-                            if ca.assessment
-                            else "",
-                        }
-                    )
-            return results
+        """Return identifiers needed to publish resume-processing events."""
+        context = await self.get_by_id(ca_record_id)
+        if context is None:
+            return None
+        return {
+            "candidate_assessment_id": str(context.id),
+            "assessment_id": str(context.assessment_id),
+            "recruiter_id": str(context.assessment.recruiter_id),
+            "candidate_name": context.candidate.full_name,
+        }

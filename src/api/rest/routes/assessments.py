@@ -11,15 +11,13 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
+from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
 from src.core.exceptions import (
     AuthenticationException,
     BadRequestException,
 )
 from src.core.services.assessment_service import AssessmentService
-from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import (
     AssessmentCreateForm,
     AssessmentResponse,
@@ -33,10 +31,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_assessment_service(
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
 ) -> AssessmentService:
     """Build the assessment service from request-scoped dependencies."""
-    return AssessmentService(AssessmentRepository(session))
+    return AssessmentService(unit_of_work.assessments)
 
 
 @router.post(

@@ -12,18 +12,10 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
+from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
 from src.core.exceptions import AuthenticationException, BadRequestException
 from src.core.services.candidate_service import CandidateService
-from src.data.repositories.assessment_repository import AssessmentRepository
-from src.data.repositories.candidate_assessment_repository import (
-    CandidateAssessmentRepository,
-)
-from src.data.repositories.candidate_repository import CandidateRepository
-from src.data.repositories.evaluation_repository import EvaluationRepository
-from src.data.repositories.event_logs_repository import EventLogsRepository
 from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
@@ -42,14 +34,14 @@ logger = logging.getLogger(__name__)
 
 
 def get_candidate_service(
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
 ) -> CandidateService:
     """Build the candidate service from request-scoped dependencies."""
     return CandidateService(
-        candidate_repo=CandidateRepository(session),
-        ca_repo=CandidateAssessmentRepository(session),
-        assessment_repo=AssessmentRepository(session),
-        event_logs_repo=EventLogsRepository(session),
+        candidate_repo=unit_of_work.candidates,
+        ca_repo=unit_of_work.candidate_assessments,
+        assessment_repo=unit_of_work.assessments,
+        event_logs_repo=unit_of_work.event_logs,
     )
 
 
@@ -202,7 +194,7 @@ async def list_candidates(
 )
 async def list_recruiter_evaluations(
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
 ) -> APIResponse[list[RecruiterEvaluationListItem]]:
     """Return recruiter-owned candidate evaluations for the dashboard."""
     if not x_user_id:
@@ -213,8 +205,7 @@ async def list_recruiter_evaluations(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    eval_repo = EvaluationRepository(session)
-    rows = await eval_repo.list_by_recruiter(recruiter_id)
+    rows = await unit_of_work.evaluations.list_by_recruiter(recruiter_id)
 
     data: list[RecruiterEvaluationListItem] = []
     for evaluation, ca, candidate, assessment in rows:
@@ -311,7 +302,7 @@ async def update_recruiter_decision(
 async def get_candidate_evaluation(
     ca_id: uuid.UUID,
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
 ) -> APIResponse[InterviewEvaluationResponse]:
     """Fetch the evaluation report."""
     if not x_user_id:
@@ -322,8 +313,7 @@ async def get_candidate_evaluation(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    ca_repo = CandidateAssessmentRepository(session)
-    ca = await ca_repo.get_by_id(ca_id)
+    ca = await unit_of_work.candidate_assessments.get_by_id(ca_id)
     if ca is None:
         from src.core.exceptions import NotFoundException
 
@@ -333,8 +323,7 @@ async def get_candidate_evaluation(
 
         raise ForbiddenException("You do not have access to this evaluation.")
 
-    eval_repo = EvaluationRepository(session)
-    evaluation = await eval_repo.get_by_candidate_assessment_id(ca_id)
+    evaluation = await unit_of_work.evaluations.get_by_candidate_assessment_id(ca_id)
 
     if not evaluation:
         from src.core.exceptions import NotFoundException

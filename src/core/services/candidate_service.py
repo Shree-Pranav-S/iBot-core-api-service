@@ -4,8 +4,8 @@ import asyncio
 import csv
 import io
 import logging
-import os
 import uuid
+from pathlib import Path
 
 from src.config.settings import settings
 from src.core.exceptions import (
@@ -21,9 +21,6 @@ from src.data.repositories.candidate_assessment_repository import (
 )
 from src.data.repositories.candidate_repository import CandidateRepository
 from src.data.repositories.event_logs_repository import EventLogsRepository
-from src.data.repositories.notification_log_repository import (
-    NotificationLogRepository,
-)
 from src.handlers.celery_tasks.notification_tasks import enqueue_invitation_email
 from src.schemas.candidate import BulkUploadResponse, CSVRowResult
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
@@ -32,6 +29,8 @@ from src.utils.candidates import (
     download_resume,
     parse_resume_from_file,
     send_hiring_decision_email,
+    temporary_resume_path,
+    write_temporary_resume,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,8 +357,6 @@ class CandidateService:
         resume_filename: str,
     ) -> CandidateAssessment:
         """Create a single candidate and dispatch processing and email."""
-        import os
-
         # Match assessment
         all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
         role_assessment_map = {a.role_name.strip().lower(): a for a in all_assessments}
@@ -395,11 +392,10 @@ class CandidateService:
             resume_file_path=resume_filename,
         )
 
-        # Save resume locally
-        os.makedirs("temp_resumes", exist_ok=True)
-        temp_file_path = f"temp_resumes/{ca_record.id}.pdf"
-        with open(temp_file_path, "wb") as f:
-            f.write(resume_file_bytes)
+        temp_file_path = await write_temporary_resume(
+            ca_record.id,
+            resume_file_bytes,
+        )
 
         invitation_link = (
             f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
@@ -422,7 +418,7 @@ class CandidateService:
             asyncio.create_task(
                 self.process_candidate_resume_in_background(
                     ca_record_id=ca_record.id,
-                    temp_file_path=temp_file_path,
+                    temp_file_path=str(temp_file_path),
                 )
             )
 
@@ -497,14 +493,11 @@ class CandidateService:
     async def process_candidate_resume_in_background(
         self, ca_record_id, resume_url=None, temp_file_path=None
     ):
-        from src.data.repositories.candidate_assessment_repository import (
-            CandidateAssessmentRepository,
-        )
+        from src.data.repositories.unit_of_work import UnitOfWork
 
         try:
             if resume_url:
-                os.makedirs("temp_resumes", exist_ok=True)
-                temp_file_path = f"temp_resumes/{ca_record_id}.pdf"
+                temp_file_path = str(temporary_resume_path(ca_record_id))
                 await download_resume(resume_url, temp_file_path)
 
             if not temp_file_path:
@@ -516,11 +509,15 @@ class CandidateService:
 
             resume_parsed = await parse_resume_from_file(temp_file_path)
 
-            realtime_context = await (
-                CandidateAssessmentRepository.save_parsed_resume_success_in_background(
+            async with UnitOfWork() as unit_of_work:
+                await unit_of_work.candidate_assessments.save_parsed_resume_success(
                     ca_record_id, resume_parsed
                 )
-            )
+                realtime_context = (
+                    await unit_of_work.candidate_assessments.get_realtime_context(
+                        ca_record_id
+                    )
+                )
             if realtime_context:
                 await publish_recruiter_event(
                     recruiter_id=realtime_context["recruiter_id"],
@@ -534,9 +531,15 @@ class CandidateService:
         except Exception as exc:
             logger.exception("Failed to parse resume for ca_record %s", ca_record_id)
             try:
-                realtime_context = await CandidateAssessmentRepository.save_parsed_resume_failed_in_background(
-                    ca_record_id, str(exc)
-                )
+                async with UnitOfWork() as unit_of_work:
+                    await unit_of_work.candidate_assessments.save_parsed_resume_failed(
+                        ca_record_id, str(exc)
+                    )
+                    realtime_context = (
+                        await unit_of_work.candidate_assessments.get_realtime_context(
+                            ca_record_id
+                        )
+                    )
                 if realtime_context:
                     await publish_recruiter_event(
                         recruiter_id=realtime_context["recruiter_id"],
@@ -552,11 +555,18 @@ class CandidateService:
                     ca_record_id,
                 )
         finally:
-            if temp_file_path and os.path.exists(temp_file_path):
+            if temp_file_path:
                 try:
-                    os.remove(temp_file_path)
-                except Exception:
-                    pass
+                    await asyncio.to_thread(
+                        Path(temp_file_path).unlink,
+                        missing_ok=True,
+                    )
+                except OSError:
+                    logger.warning(
+                        "Could not remove temporary resume %s",
+                        temp_file_path,
+                        exc_info=True,
+                    )
 
     async def dispatch_decision_with_logging(
         self,
@@ -578,22 +588,26 @@ class CandidateService:
                 decision=decision,
                 feedback=feedback,
             )
-            await NotificationLogRepository.log_decision_sent_in_background(
-                ca_record_id,
-                recipient_email,
-                notification_type,
-            )
+            from src.data.repositories.unit_of_work import UnitOfWork
+
+            async with UnitOfWork() as unit_of_work:
+                await unit_of_work.notifications.log_decision_sent(
+                    ca_record_id, recipient_email, notification_type
+                )
         except Exception as exc:
             logger.exception(
                 "Failed to dispatch hiring decision email for candidate %s",
                 ca_record_id,
             )
             try:
-                await NotificationLogRepository.log_decision_failed_in_background(
-                    ca_record_id,
-                    recipient_email,
-                    notification_type,
-                    f"{type(exc).__name__}: {exc}",
-                )
+                from src.data.repositories.unit_of_work import UnitOfWork
+
+                async with UnitOfWork() as unit_of_work:
+                    await unit_of_work.notifications.log_decision_failed(
+                        ca_record_id,
+                        recipient_email,
+                        notification_type,
+                        f"{type(exc).__name__}: {exc}",
+                    )
             except Exception:
                 pass

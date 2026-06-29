@@ -1,16 +1,19 @@
 """Celery client configuration for core API background workloads."""
 
 import asyncio
+from collections.abc import Coroutine
+from typing import Any, TypeVar
 
 from celery import Celery
 from kombu import Queue
 
 from src.config.settings import settings
 
-_celery_loop = None
+T = TypeVar("T")
+_celery_loop: asyncio.AbstractEventLoop | None = None
 
 
-def run_async(coro):
+def run_async(coro: Coroutine[Any, Any, T]) -> T:
     """Run an async coroutine without closing the underlying event loop."""
     global _celery_loop
     if _celery_loop is None:
@@ -31,6 +34,7 @@ celery_app = Celery(
 
 celery_app.conf.update(
     accept_content=["json"],
+    broker_connection_retry_on_startup=True,
     enable_utc=True,
     result_serializer="json",
     task_acks_late=True,

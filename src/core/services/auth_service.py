@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from redis.asyncio import Redis
@@ -302,3 +303,10 @@ class AuthService:
 
         await send_otp_email(recipient_email=normalized_email, otp=otp)
         logger.info("Password reset OTP resent", extra={"email": normalized_email})
+
+    async def get_recruiter(self, recruiter_id: uuid.UUID) -> Recruiter:
+        """Return an active recruiter profile by identifier."""
+        recruiter = await self._repository.get_recruiter_by_id(recruiter_id)
+        if recruiter is None:
+            raise NotFoundException("Recruiter not found.")
+        return recruiter

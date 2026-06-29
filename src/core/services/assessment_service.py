@@ -186,14 +186,11 @@ class AssessmentService:
             )
             jd_analysis = generated.jd_analysis
             interview_plan = generated.interview_plan
-            # Delegate DB flush and commit to the repository classmethod
-            from src.data.repositories.assessment_repository import AssessmentRepository
-
-            await AssessmentRepository.activate_assessment_in_background(
-                assessment_id=assessment_id,
-                jd_text=parsed_jd_text,
-                jd_analysis=jd_analysis.model_dump(),
-                interview_plan=interview_plan.model_dump(),
+            await self._repository.activate_assessment(
+                assessment_id,
+                parsed_jd_text,
+                jd_analysis.model_dump(),
+                interview_plan.model_dump(),
             )
             await publish_recruiter_event(
                 recruiter_id=assessment.recruiter_id,
@@ -213,14 +210,7 @@ class AssessmentService:
                 "Failed to process assessment %s in background.", assessment_id
             )
             try:
-                # Set status to CLOSED to signal failure using the repository classmethod
-                from src.data.repositories.assessment_repository import (
-                    AssessmentRepository,
-                )
-
-                await AssessmentRepository.close_assessment_on_failure_in_background(
-                    assessment_id
-                )
+                await self._repository.close_assessment_on_failure(assessment_id)
                 if assessment is not None:
                     await publish_recruiter_event(
                         recruiter_id=assessment.recruiter_id,
@@ -243,13 +233,24 @@ class AssessmentService:
     ) -> None:
         """Fetch all candidates for an assessment and dispatch cancellation emails."""
         try:
-            from src.data.repositories.candidate_assessment_repository import (
-                CandidateAssessmentRepository,
-            )
+            from src.data.repositories.unit_of_work import UnitOfWork
 
-            candidates_info = await CandidateAssessmentRepository.get_candidate_emails_for_assessment_in_background(
-                assessment_id
-            )
+            async with UnitOfWork() as unit_of_work:
+                records = (
+                    await unit_of_work.candidate_assessments.get_all_by_assessment(
+                        assessment_id
+                    )
+                )
+                candidates_info = [
+                    {
+                        "candidate_name": record.candidate.full_name,
+                        "recipient_email": record.candidate.email,
+                        "assessment_title": record.assessment.title,
+                        "role_name": record.assessment.role_name,
+                    }
+                    for record in records
+                    if record.candidate and record.candidate.email and record.assessment
+                ]
 
             if not candidates_info:
                 logger.warning(

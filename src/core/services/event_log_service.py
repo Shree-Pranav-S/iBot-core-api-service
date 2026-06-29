@@ -3,8 +3,8 @@
 import logging
 from collections.abc import Sequence
 
-from src.data.clients.postgres_client import get_session_factory
 from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.unit_of_work import UnitOfWork
 from src.schemas.event_log import EventLogCreate
 
 logger = logging.getLogger(__name__)
@@ -24,10 +24,8 @@ class EventLogService:
 async def record_event_in_background(event: EventLogCreate) -> None:
     """Write an event in its own transaction for workers and callbacks."""
 
-    session_factory = await get_session_factory()
-    async with session_factory() as session, session.begin():
-        service = EventLogService(EventLogsRepository(session))
-        await service.record(event)
+    async with UnitOfWork() as unit_of_work:
+        await EventLogService(unit_of_work.event_logs).record(event)
 
 
 async def try_record_event_in_background(event: EventLogCreate) -> None:

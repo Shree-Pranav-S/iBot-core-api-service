@@ -11,8 +11,7 @@ from typing import Any
 from src.core.services.assessment_service import AssessmentService
 from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app, run_async
-from src.data.clients.postgres_client import get_session_factory
-from src.data.repositories.assessment_repository import AssessmentRepository
+from src.data.repositories.unit_of_work import UnitOfWork
 from src.schemas.assessment import FocusAreaOverride
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 
@@ -38,9 +37,8 @@ async def _process_assessment(
         else None
     )
 
-    SessionLocal = await get_session_factory()
-    async with SessionLocal() as session:
-        service = AssessmentService(AssessmentRepository(session))
+    async with UnitOfWork() as unit_of_work:
+        service = AssessmentService(unit_of_work.assessments)
         await service.process_assessment_in_background(
             assessment_id=uuid.UUID(assessment_id),
             jd_text=jd_text,

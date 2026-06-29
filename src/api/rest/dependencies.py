@@ -3,15 +3,15 @@
 from collections.abc import AsyncGenerator
 
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.data.clients.postgres_client import get_db_session as get_postgres_session
 from src.data.clients.redis_client import get_async_redis
+from src.data.repositories.unit_of_work import UnitOfWork
 
 
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    async for session in get_postgres_session():
-        yield session
+async def get_unit_of_work() -> AsyncGenerator[UnitOfWork, None]:
+    """Yield a request-scoped transaction and its repositories."""
+    async with UnitOfWork() as unit_of_work:
+        yield unit_of_work
 
 
 async def get_redis_client() -> AsyncGenerator[Redis, None]:
@@ -19,4 +19,4 @@ async def get_redis_client() -> AsyncGenerator[Redis, None]:
         yield client
 
 
-__all__ = ["AsyncSession", "Redis", "get_db_session", "get_redis_client"]
+__all__ = ["Redis", "UnitOfWork", "get_redis_client", "get_unit_of_work"]

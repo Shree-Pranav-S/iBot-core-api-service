@@ -2,7 +2,10 @@
 
 import logging
 import re
+import uuid
 from html import escape
+from pathlib import Path
+from typing import Any
 
 import fitz
 import httpx
@@ -17,6 +20,26 @@ from groq import AsyncGroq
 from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def temporary_resume_path(candidate_assessment_id: uuid.UUID) -> Path:
+    """Return the configured runtime path for a temporary resume."""
+    return Path(settings.TEMP_RESUME_DIR) / f"{candidate_assessment_id}.pdf"
+
+
+async def write_temporary_resume(
+    candidate_assessment_id: uuid.UUID,
+    content: bytes,
+) -> Path:
+    """Persist resume bytes in the writable runtime temporary directory."""
+    path = temporary_resume_path(candidate_assessment_id)
+
+    def write_file() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    await run_in_threadpool(write_file)
+    return path
 
 
 async def parse_resume_from_file(temp_file_path: str) -> dict:
@@ -47,7 +70,7 @@ async def parse_resume_from_file(temp_file_path: str) -> dict:
         "Only return raw JSON. Do not include markdown code block formatting (such as ```json) or explanation."
     )
 
-    messages = [
+    messages: Any = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
@@ -101,8 +124,13 @@ async def download_resume(resume_url: str, temp_file_path: str) -> None:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         response = await client.get(download_url, timeout=30.0)
         response.raise_for_status()
-        with open(temp_file_path, "wb") as f:
-            f.write(response.content)
+        path = Path(temp_file_path)
+
+        def write_file() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(response.content)
+
+        await run_in_threadpool(write_file)
 
 
 async def send_invitation_email(

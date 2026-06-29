@@ -4,9 +4,8 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, Request, status
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
+from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
 from src.core.exceptions import (
     AuthenticationException,
     BadRequestException,
@@ -14,7 +13,6 @@ from src.core.exceptions import (
 )
 from src.core.services.auth_service import AuthService
 from src.data.clients.redis_client import get_async_redis
-from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -32,12 +30,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def get_auth_service(
-    session: AsyncSession = Depends(get_db_session),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
     redis: Redis = Depends(get_async_redis),
 ) -> AuthService:
     """Build the auth service from request-scoped dependencies."""
 
-    return AuthService(AuthRepository(session), redis=redis)
+    return AuthService(unit_of_work.auth, redis=redis)
 
 
 @router.post(
@@ -132,7 +130,7 @@ async def get_current_recruiter(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
-    recruiter = await service._repository.get_recruiter_by_id(recruiter_id)
+    recruiter = await service.get_recruiter(recruiter_id)
     if recruiter is None:
         raise NotFoundException("Recruiter not found.")
 

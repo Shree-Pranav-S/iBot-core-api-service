@@ -308,7 +308,7 @@ directly in a database, so never add undeclared fields.
 
 REQUIRED WORK ORDER
 1. Infer the role difficulty from the JD.
-2. Extract distinct, interviewable technical skills and score their importance.
+2. Extract distinct, interviewable technical or domain-specific hard skills and score their importance.
 3. Extract behavioural and team-culture signals.
 4. Copy the exact inferred difficulty into the interview plan.
 5. Build a time plan that maximizes meaningful technical coverage.
@@ -341,13 +341,13 @@ Years-of-experience rules:
   experience. Do not use the candidate's experience; analyze only the JD.
 
 JD SKILL EXTRACTION AND PRIORITY
-- Include concrete technical skills that can be assessed in an interview:
-  languages, frameworks, databases, cloud/platform tools, architecture domains,
-  engineering practices, and directly relevant technical concepts.
+- Include concrete technical skills or domain-specific hard skills that can be assessed in an interview:
+  core domain competencies, tools, methodologies, and frameworks relevant to the profession
+  (e.g., languages and databases for IT; financial modeling for banking).
 - Consolidate aliases and duplicates into one clear skill name.
 - Do not put communication, teamwork, leadership, ownership, or culture-fit traits
   in `skills`; place those in `behavioural_signals`.
-- Keep relevant nice-to-have technical skills in `jd_analysis.skills`; the
+- Keep relevant nice-to-have technical or domain-specific skills in `jd_analysis.skills`; the
   deterministic planner may omit only those that cannot receive 30 seconds.
 - Score `priority_score` from 1.0 to 10.0:
   * 9.0-10.0: indispensable core competency repeatedly tied to primary duties.
@@ -369,22 +369,22 @@ INTERVIEW PLAN — HARD RULES
 - `inferred_difficulty` must exactly equal `jd_analysis.inferred_difficulty`.
 - Sections must be ordered as:
   1. `self_intro`
-  2. technical skill sections in descending effective importance
+  2. technical or domain skill sections in descending effective importance
   3. `behavioural_cultural`
 - `self_intro` is capped at min(10 percent of total duration, 1.0 minute), has `skill: null`,
   and must NOT contain `expected_signals`.
 - `behavioural_cultural` is always exactly 10 percent of total interview time.
   For 15 minutes it is exactly 1.5 minutes; for 30 minutes it is exactly 3.0.
-- Allocate every remaining minute to technical skills.
-- Technical time is weighted by the matching JD `priority_score`. When a matching
+- Allocate every remaining minute to technical or domain-specific skills.
+- Technical/domain time is weighted by the matching JD `priority_score`. When a matching
   `focus_areas.weight_override` exists, use it as that skill's effective weight.
-- Include as many JD technical skills as possible. Every included technical skill
-  must receive at least 0.5 minute. Drop a skill only when available technical
+- Include as many JD technical/domain-specific skills as possible. Every included skill
+  must receive at least 0.5 minute. Drop a skill only when available assessment
   time is too low to give it 0.5 minute; drop the lowest effective-weight skill
   first. Never impose an arbitrary skill-count cap.
-- A technical section's `section_name` and `skill` must both exactly match the
+- A technical or domain section's `section_name` and `skill` must both exactly match the
   corresponding `jd_analysis.skills[].skill`.
-- Technical and behavioural sections need 2-4 concise, observable
+- Technical/domain and behavioural sections need 2-4 concise, observable
   `expected_signals`. Signals should describe evidence to listen for, not questions.
 - Behavioural/cultural signals must cover both work behaviour (ownership,
   collaboration, conflict handling, adaptability, communication) and alignment
@@ -529,8 +529,8 @@ The exact permitted structure is:
         "allocated_mins": 1.0
       },
       {
-        "section_name": "exact technical skill name",
-        "skill": "exact technical skill name",
+        "section_name": "exact technical or domain skill name",
+        "skill": "exact technical or domain skill name",
         "allocated_mins": 1.0,
         "expected_signals": ["string", "string"]
       },
