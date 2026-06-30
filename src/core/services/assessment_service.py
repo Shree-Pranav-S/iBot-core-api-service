@@ -115,12 +115,6 @@ class AssessmentService:
                 "Either job description text or a PDF file must be provided."
             )
 
-        # Check for role name uniqueness
-        if await self._repository.check_role_name_exists(recruiter_id, role_name):
-            raise BadRequestException(
-                f"An assessment with the role name '{role_name}' already exists. Please choose a different role name."
-            )
-
         db_assessment = Assessment(
             recruiter_id=recruiter_id,
             title=title,

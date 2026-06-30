@@ -19,9 +19,12 @@ from src.core.services.candidate_service import CandidateService
 from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
+    ExistingCandidateListItem,
+    InterviewTranscriptResponse,
     RecruiterDecisionRequest,
     RecruiterDecisionResponse,
     SingleCandidateResponse,
+    TranscriptTurn,
 )
 from src.schemas.common import APIResponse
 from src.schemas.evaluation import (
@@ -52,15 +55,15 @@ def get_candidate_service(
     summary="Bulk upload candidates from CSV",
     description=(
         "Upload a CSV file containing candidate records. "
-        "Each row must have columns: name, email, resume, role. "
-        "Candidates are matched to active assessments by role name (case-insensitive) "
+        "Each row must have columns: name, email, resume, assessment_id. "
+        "Candidates are matched to assessments by assessment_id (UUID) "
         "and receive an invitation email with their unique interview link."
     ),
 )
 async def bulk_upload_candidates(
     csv_file: UploadFile = File(
         ...,
-        description="CSV file with columns: name, email, resume, role",
+        description="CSV file with columns: name, email, resume, assessment_id",
     ),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     service: CandidateService = Depends(get_candidate_service),
@@ -103,12 +106,12 @@ async def bulk_upload_candidates(
     response_model=APIResponse[SingleCandidateResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Create a single candidate manually",
-    description="Upload a candidate with their resume PDF manually.",
+    description="Upload a candidate with their resume PDF manually, selecting the assessment by ID.",
 )
 async def create_single_candidate_manual(
     name: str = Form(...),
     email: str = Form(...),
-    role: str = Form(...),
+    assessment_id: str = Form(..., description="UUID of the target assessment"),
     resume: UploadFile = File(...),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     service: CandidateService = Depends(get_candidate_service),
@@ -121,6 +124,13 @@ async def create_single_candidate_manual(
     except ValueError:
         raise BadRequestException("Invalid X-User-Id header format.")
 
+    try:
+        assessment_uuid = uuid.UUID(assessment_id)
+    except ValueError:
+        raise BadRequestException(
+            "Invalid assessment_id format — must be a valid UUID."
+        )
+
     if not resume.filename or not resume.filename.lower().endswith(".pdf"):
         raise BadRequestException("Uploaded resume must be a PDF (.pdf extension).")
 
@@ -132,7 +142,7 @@ async def create_single_candidate_manual(
         recruiter_id=recruiter_id,
         name=name,
         email=email,
-        role=role,
+        assessment_id=assessment_uuid,
         resume_file_bytes=file_bytes,
         resume_filename=resume.filename,
     )
@@ -144,6 +154,106 @@ async def create_single_candidate_manual(
             candidate_id=ca_record.candidate_id,
             full_name=name,
             email=email,
+            status=ca_record.status,
+        ),
+    )
+
+
+@router.get(
+    "/all-candidates",
+    response_model=APIResponse[list[ExistingCandidateListItem]],
+    summary="List unique candidates for recruiter",
+    description="Return all unique candidates (not per-assessment) created by the recruiter. Used for enrollment into additional assessments.",
+)
+async def list_unique_candidates(
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    service: CandidateService = Depends(get_candidate_service),
+) -> APIResponse[list[ExistingCandidateListItem]]:
+    """Return all unique candidate records for the recruiter."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    candidates = await service.get_unique_candidates_for_recruiter(recruiter_id)
+    return APIResponse(
+        message="Candidates retrieved successfully.",
+        data=[
+            ExistingCandidateListItem(
+                id=c.id,
+                full_name=c.full_name,
+                email=c.email,
+            )
+            for c in candidates
+        ],
+    )
+
+
+@router.post(
+    "/enroll",
+    response_model=APIResponse[SingleCandidateResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Enroll an existing candidate into a new assessment",
+    description=(
+        "Enroll an already-known candidate into a new assessment. "
+        "Checks that the new assessment's time window does not conflict with "
+        "any active (non-completed) enrollment for the candidate. "
+        "Optionally accepts a new resume PDF; otherwise the previous resume is reused."
+    ),
+)
+async def enroll_existing_candidate(
+    candidate_id: str = Form(..., description="UUID of the existing candidate"),
+    assessment_id: str = Form(..., description="UUID of the target assessment"),
+    resume: UploadFile | None = File(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    service: CandidateService = Depends(get_candidate_service),
+) -> APIResponse[SingleCandidateResponse]:
+    """Enroll an existing candidate into an additional assessment."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    try:
+        candidate_uuid = uuid.UUID(candidate_id)
+    except ValueError:
+        raise BadRequestException("Invalid candidate_id format — must be a valid UUID.")
+
+    try:
+        assessment_uuid = uuid.UUID(assessment_id)
+    except ValueError:
+        raise BadRequestException(
+            "Invalid assessment_id format — must be a valid UUID."
+        )
+
+    resume_bytes: bytes | None = None
+    resume_filename: str | None = None
+    if resume is not None and resume.filename:
+        if not resume.filename.lower().endswith(".pdf"):
+            raise BadRequestException("Uploaded resume must be a PDF (.pdf extension).")
+        resume_bytes = await resume.read()
+        if resume_bytes:
+            resume_filename = resume.filename
+
+    ca_record, candidate = await service.enroll_existing_candidate(
+        recruiter_id=recruiter_id,
+        candidate_id=candidate_uuid,
+        assessment_id=assessment_uuid,
+        resume_file_bytes=resume_bytes,
+        resume_filename=resume_filename,
+    )
+
+    return APIResponse(
+        message="Candidate enrolled and invitation queued.",
+        data=SingleCandidateResponse(
+            candidate_assessment_id=ca_record.id,
+            candidate_id=ca_record.candidate_id,
+            full_name=candidate.full_name,
+            email=candidate.email,
             status=ca_record.status,
         ),
     )
@@ -344,6 +454,74 @@ async def get_candidate_evaluation(
     return APIResponse(
         message="Evaluation retrieved successfully.",
         data=response,
+    )
+
+
+@router.get(
+    "/{ca_id}/transcript",
+    response_model=APIResponse[InterviewTranscriptResponse],
+    summary="Get interview transcript",
+    description="Return the full interview transcript for a candidate assessment, if an interview session exists.",
+)
+async def get_interview_transcript(
+    ca_id: uuid.UUID,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
+) -> APIResponse[InterviewTranscriptResponse]:
+    """Fetch the interview transcript for a candidate."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    ca = await unit_of_work.candidate_assessments.get_by_id(ca_id)
+    if ca is None:
+        from src.core.exceptions import NotFoundException
+
+        raise NotFoundException("Candidate registration not found.")
+    if ca.assessment.recruiter_id != recruiter_id:
+        from src.core.exceptions import ForbiddenException
+
+        raise ForbiddenException("You do not have access to this transcript.")
+
+    from sqlalchemy import select
+
+    from src.data.models.postgres.interview_session import InterviewSession
+
+    db_session = unit_of_work._require_session()
+    statement = select(InterviewSession).where(
+        InterviewSession.candidate_assessment_id == ca_id
+    )
+    result = await db_session.execute(statement)
+    session = result.scalar_one_or_none()
+
+    turns: list[TranscriptTurn] = []
+    total_elapsed_secs = 0
+
+    if session and session.transcript:
+        total_elapsed_secs = session.total_elapsed_secs or 0
+        for raw_turn in session.transcript:
+            if isinstance(raw_turn, dict):
+                turns.append(
+                    TranscriptTurn(
+                        turn_number=int(raw_turn.get("turn_number", len(turns) + 1)),
+                        speaker=str(raw_turn.get("speaker", "unknown")),
+                        text=str(raw_turn.get("text", "")),
+                        tone=raw_turn.get("tone"),
+                    )
+                )
+
+    return APIResponse(
+        message="Transcript retrieved successfully.",
+        data=InterviewTranscriptResponse(
+            candidate_assessment_id=ca_id,
+            candidate_name=ca.candidate.full_name if ca.candidate else None,
+            assessment_title=ca.assessment.title if ca.assessment else None,
+            total_elapsed_secs=total_elapsed_secs,
+            turns=turns,
+        ),
     )
 
 

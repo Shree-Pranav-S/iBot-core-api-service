@@ -1,4 +1,4 @@
-"""Business logic for bulk candidate upload, role matching, and invitation dispatch."""
+"""Business logic for bulk candidate upload, assessment matching, and invitation dispatch."""
 
 import asyncio
 import csv
@@ -14,6 +14,7 @@ from src.core.exceptions import (
     NotFoundException,
 )
 from src.core.services.realtime_event_service import publish_recruiter_event
+from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.data.repositories.candidate_assessment_repository import (
@@ -36,7 +37,7 @@ from src.utils.candidates import (
 logger = logging.getLogger(__name__)
 
 # Required CSV column headers (case-insensitive)
-REQUIRED_COLUMNS = {"name", "email", "resume", "role"}
+REQUIRED_COLUMNS = {"name", "email", "resume", "assessment_id"}
 
 
 class CandidateService:
@@ -72,11 +73,11 @@ class CandidateService:
         filename: str,
     ) -> BulkUploadResponse:
         """
-        Parse the uploaded CSV, match each candidate's role to an active assessment,
+        Parse the uploaded CSV, match each candidate's assessment_id to an assessment,
         create candidate and candidate-assessment records, and dispatch invitation emails.
 
-        The CSV must contain columns: name, email, resume, role.
-        Role matching is case-insensitive against active assessments owned by this recruiter.
+        The CSV must contain columns: name, email, resume, assessment_id.
+        The assessment_id must be a valid UUID matching an assessment owned by this recruiter.
         """
         # Parse CSV
         try:
@@ -93,19 +94,16 @@ class CandidateService:
         if missing:
             raise BadRequestException(
                 f"CSV is missing required columns: {', '.join(sorted(missing))}. "
-                f"Expected: name, email, resume, role."
+                f"Expected: name, email, resume, assessment_id."
             )
 
         rows = list(reader)
         if not rows:
             raise BadRequestException("CSV file contains no data rows.")
 
-        # Load all active assessments owned by this recruiter
+        # Load all assessments owned by this recruiter and build a UUID lookup map
         all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
-        # Build a role_name -> assessment lookup (case-insensitive)
-        role_assessment_map: dict[str, object] = {
-            a.role_name.strip().lower(): a for a in all_assessments
-        }
+        assessment_map: dict[str, object] = {str(a.id): a for a in all_assessments}
 
         total_rows = len(rows)
         upload_id = uuid.uuid4()
@@ -125,10 +123,10 @@ class CandidateService:
             email = row.get("email", "")
             name = row.get("name", "")
             resume_placeholder = row.get("resume", "placeholder_resume.pdf")
-            role = row.get("role", "")
+            assessment_id_str = row.get("assessment_id", "")
 
-            if not email or not name or not role:
-                reason = "Missing required fields: name, email, or role."
+            if not email or not name or not assessment_id_str:
+                reason = "Missing required fields: name, email, or assessment_id."
                 result = CSVRowResult(
                     row=row_idx,
                     email=email or "(empty)",
@@ -146,7 +144,7 @@ class CandidateService:
                             "filename": filename,
                             "row_number": row_idx,
                             "email": result.email,
-                            "role": role,
+                            "assessment_id": assessment_id_str,
                             "reason_code": "MISSING_REQUIRED_FIELDS",
                         },
                         error_message=reason,
@@ -155,12 +153,12 @@ class CandidateService:
                 failed_rows += 1
                 continue
 
-            # Role matching
-            matched_assessment = role_assessment_map.get(role.lower())
+            # Assessment ID matching
+            matched_assessment = assessment_map.get(assessment_id_str.strip())
             if matched_assessment is None:
                 reason = (
-                    f"No assessment found for role '{role}'. "
-                    "Ensure an assessment with this role name exists and is active."
+                    f"No assessment found with ID '{assessment_id_str}'. "
+                    "Ensure the assessment_id is valid and belongs to your account."
                 )
                 row_results.append(
                     CSVRowResult(
@@ -180,7 +178,7 @@ class CandidateService:
                             "filename": filename,
                             "row_number": row_idx,
                             "email": email,
-                            "role": role,
+                            "assessment_id": assessment_id_str,
                             "reason_code": "ASSESSMENT_NOT_FOUND",
                         },
                         error_message=reason,
@@ -218,24 +216,24 @@ class CandidateService:
                             reason=reason,
                         )
                     )
-                    failure_events.append(
-                        EventLogCreate(
-                            event_name=EventName.CSV_ROW_FAILED,
-                            source_service=EventSource.CORE_API,
-                            correlation_id=str(upload_id),
-                            recruiter_id=recruiter_id,
-                            metadata={
-                                "filename": filename,
-                                "row_number": row_idx,
-                                "email": email,
-                                "role": role,
-                                "reason_code": "CANDIDATE_ALREADY_REGISTERED",
-                            },
-                            error_message=reason,
-                        )
+                failure_events.append(
+                    EventLogCreate(
+                        event_name=EventName.CSV_ROW_FAILED,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=str(upload_id),
+                        recruiter_id=recruiter_id,
+                        metadata={
+                            "filename": filename,
+                            "row_number": row_idx,
+                            "email": email,
+                            "assessment_id": assessment_id_str,
+                            "reason_code": "CANDIDATE_ALREADY_REGISTERED",
+                        },
+                        error_message=reason,
                     )
-                    failed_rows += 1
-                    continue
+                )
+                failed_rows += 1
+                continue
 
                 ca_record = await self._ca_repo.create(
                     candidate_id=candidate.id,
@@ -280,7 +278,7 @@ class CandidateService:
                             "filename": filename,
                             "row_number": row_idx,
                             "email": email,
-                            "role": role,
+                            "assessment_id": assessment_id_str,
                             "reason_code": "ROW_PROCESSING_FAILED",
                             "exception_type": type(exc).__name__,
                         },
@@ -352,18 +350,20 @@ class CandidateService:
         recruiter_id: uuid.UUID,
         name: str,
         email: str,
-        role: str,
+        assessment_id: uuid.UUID,
         resume_file_bytes: bytes,
         resume_filename: str,
     ) -> CandidateAssessment:
         """Create a single candidate and dispatch processing and email."""
-        # Match assessment
-        all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
-        role_assessment_map = {a.role_name.strip().lower(): a for a in all_assessments}
-        matched_assessment = role_assessment_map.get(role.strip().lower())
-
-        if matched_assessment is None:
-            raise BadRequestException(f"No assessment found for role '{role}'.")
+        # Verify assessment belongs to recruiter
+        matched_assessment = await self._assessment_repo.get_by_id(assessment_id)
+        if (
+            matched_assessment is None
+            or matched_assessment.recruiter_id != recruiter_id
+        ):
+            raise BadRequestException(
+                f"No assessment found with ID '{assessment_id}' for your account."
+            )
 
         existing_candidate = await self._candidate_repo.get_by_email(email)
         if existing_candidate is None:
@@ -431,6 +431,131 @@ class CandidateService:
     ) -> list[CandidateAssessment]:
         """Return all candidate-assessments for all assessments owned by the recruiter."""
         return await self._ca_repo.get_all_by_recruiter(recruiter_id)
+
+    async def get_unique_candidates_for_recruiter(
+        self, recruiter_id: uuid.UUID
+    ) -> list:
+        """Return unique candidate records (not per-assessment) created by this recruiter."""
+        return await self._candidate_repo.get_all_for_recruiter(recruiter_id)
+
+    async def enroll_existing_candidate(
+        self,
+        recruiter_id: uuid.UUID,
+        candidate_id: uuid.UUID,
+        assessment_id: uuid.UUID,
+        resume_file_bytes: bytes | None,
+        resume_filename: str | None,
+    ) -> tuple[CandidateAssessment, Candidate]:
+        """
+        Enroll an existing candidate into a new assessment.
+
+        Checks for time window overlaps across the candidate's existing enrollments.
+        If a window conflict exists, the conflicting enrollment must be COMPLETED or EVALUATED
+        for the enrollment to proceed. A new resume may optionally be supplied;
+        if omitted the previous enrollment's resume path is reused.
+        """
+        # Verify assessment belongs to recruiter
+        new_assessment = await self._assessment_repo.get_by_id(assessment_id)
+        if new_assessment is None or new_assessment.recruiter_id != recruiter_id:
+            raise BadRequestException(
+                f"No assessment found with ID '{assessment_id}' for your account."
+            )
+
+        # Verify candidate exists
+        candidate = await self._candidate_repo.get_by_id(candidate_id)
+        if candidate is None:
+            raise NotFoundException("Candidate not found.")
+
+        # Prevent duplicate registration
+        existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
+            candidate_id, assessment_id
+        )
+        if existing_ca is not None:
+            raise BadRequestException(
+                "Candidate is already registered for this assessment."
+            )
+
+        # Time window conflict check
+        all_enrollments = await self._ca_repo.get_all_by_candidate_id(candidate_id)
+        new_start = new_assessment.window_start
+        new_end = new_assessment.window_end
+
+        COMPLETED_STATUSES = {"COMPLETED", "EVALUATED"}
+
+        for enrollment in all_enrollments:
+            existing_assessment = enrollment.assessment
+            if existing_assessment is None:
+                continue
+            ex_start = existing_assessment.window_start
+            ex_end = existing_assessment.window_end
+            if (
+                ex_start is None
+                or ex_end is None
+                or new_start is None
+                or new_end is None
+            ):
+                continue
+
+            # Windows overlap when one starts before the other ends
+            overlaps = new_start < ex_end and ex_start < new_end
+            if overlaps and enrollment.status not in COMPLETED_STATUSES:
+                raise BadRequestException(
+                    f"Candidate already has an active enrollment in "
+                    f"'{existing_assessment.title}' (ID: {existing_assessment.id}) "
+                    f"whose interview window overlaps with the new assessment. "
+                    f"The candidate must complete that assessment first."
+                )
+
+        # Determine resume path — reuse previous if none provided
+        if resume_file_bytes and resume_filename:
+            resume_path = resume_filename
+        else:
+            # Find the most recent enrollment with a resume
+            resume_path = "placeholder_resume.pdf"
+            for enrollment in all_enrollments:
+                if enrollment.resume_file_path:
+                    resume_path = enrollment.resume_file_path
+                    break
+
+        ca_record = await self._ca_repo.create(
+            candidate_id=candidate_id,
+            assessment_id=assessment_id,
+            resume_file_path=resume_path,
+        )
+
+        invitation_link = (
+            f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
+        )
+
+        def _trigger_enroll_email() -> None:
+            enqueue_invitation_email(
+                ca_record_id=ca_record.id,
+                candidate_name=candidate.full_name,
+                recipient_email=candidate.email,
+                assessment_title=new_assessment.title,
+                role_name=new_assessment.role_name,
+                invitation_link=invitation_link,
+                interview_duration_mins=new_assessment.interview_duration_mins,
+            )
+
+        self._ca_repo.register_after_commit_callback(_trigger_enroll_email)
+
+        if resume_file_bytes and resume_filename:
+            temp_file_path = await write_temporary_resume(
+                ca_record.id, resume_file_bytes
+            )
+
+            def _trigger_enroll_resume() -> None:
+                asyncio.create_task(
+                    self.process_candidate_resume_in_background(
+                        ca_record_id=ca_record.id,
+                        temp_file_path=str(temp_file_path),
+                    )
+                )
+
+            self._ca_repo.register_after_commit_callback(_trigger_enroll_resume)
+
+        return ca_record, candidate
 
     async def update_recruiter_decision(
         self,

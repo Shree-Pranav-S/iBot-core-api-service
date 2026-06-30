@@ -8,14 +8,23 @@ from src.data.clients.postgres_client import (
     get_session_factory,
     run_after_commit_callbacks,
 )
+from src.data.repositories.assessment_context_repository import (
+    AssessmentContextRepository,
+)
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.data.repositories.auth_repository import AuthRepository
 from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
+from src.data.repositories.candidate_session_repository import (
+    CandidateSessionRepository,
+)
 from src.data.repositories.evaluation_repository import EvaluationRepository
 from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.interview_session_repository import (
+    InterviewSessionRepository,
+)
 from src.data.repositories.notification_log_repository import (
     NotificationLogRepository,
 )
@@ -37,6 +46,9 @@ class UnitOfWork:
         self.evaluations = EvaluationRepository(self._session)
         self.event_logs = EventLogsRepository(self._session)
         self.notifications = NotificationLogRepository(self._session)
+        self.interview_sessions = InterviewSessionRepository(self._session)
+        self.candidate_sessions = CandidateSessionRepository(self._session)
+        self.assessment_context = AssessmentContextRepository(self._session)
         return self
 
     async def __aexit__(

@@ -48,6 +48,43 @@ class SingleCandidateResponse(AppBaseModel):
     status: str
 
 
+class ExistingCandidateListItem(AppBaseModel):
+    """A unique candidate record (not per-assessment) for use in enrollment dropdowns."""
+
+    id: uuid.UUID
+    full_name: str
+    email: str
+
+
+class EnrollCandidateResponse(AppBaseModel):
+    """Response for enrolling an existing candidate into a new assessment."""
+
+    candidate_assessment_id: uuid.UUID
+    candidate_id: uuid.UUID
+    full_name: str
+    email: str
+    status: str
+
+
+class TranscriptTurn(AppBaseModel):
+    """A single turn in the interview transcript."""
+
+    turn_number: int
+    speaker: str
+    text: str
+    tone: str | None = None
+
+
+class InterviewTranscriptResponse(AppBaseModel):
+    """Full interview transcript for a candidate assessment."""
+
+    candidate_assessment_id: uuid.UUID
+    candidate_name: str | None = None
+    assessment_title: str | None = None
+    total_elapsed_secs: int = 0
+    turns: list[TranscriptTurn]
+
+
 # Candidate response schemas
 
 

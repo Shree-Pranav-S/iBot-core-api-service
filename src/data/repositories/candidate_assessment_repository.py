@@ -76,6 +76,22 @@ class CandidateAssessmentRepository:
         result = await self._session.execute(statement)
         return list(result.scalars().all())
 
+    async def get_all_by_candidate_id(
+        self, candidate_id: uuid.UUID
+    ) -> list[CandidateAssessment]:
+        """Return all candidate-assessment records for a given candidate, with assessment loaded."""
+
+        statement = (
+            select(CandidateAssessment)
+            .options(
+                selectinload(CandidateAssessment.assessment),
+            )
+            .where(CandidateAssessment.candidate_id == candidate_id)
+            .order_by(CandidateAssessment.created_at.desc())
+        )
+        result = await self._session.execute(statement)
+        return list(result.scalars().all())
+
     async def get_all_by_recruiter(
         self, recruiter_id: uuid.UUID
     ) -> list[CandidateAssessment]:

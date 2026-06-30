@@ -48,6 +48,16 @@ class CandidateRepository:
         logger.info("Candidate created", extra={"candidate_id": str(candidate.id)})
         return candidate
 
+    async def get_all_for_recruiter(self, recruiter_id: uuid.UUID) -> list[Candidate]:
+        """Return all candidates created by this recruiter."""
+        statement = (
+            select(Candidate)
+            .where(Candidate.created_by == recruiter_id)
+            .order_by(Candidate.full_name.asc())
+        )
+        result = await self._session.execute(statement)
+        return list(result.scalars().all())
+
     async def update_candidate(self, candidate: Candidate) -> Candidate:
         """Update and flush an existing candidate record."""
         self._session.add(candidate)
