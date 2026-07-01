@@ -61,6 +61,12 @@ class InterviewEvaluation(Base):
         default=dict,
         server_default="{}",
     )
+    question_evaluations: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default="[]",
+    )
 
     behavioural_cultural_score: Mapped[float] = mapped_column(
         Float,

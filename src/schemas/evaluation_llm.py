@@ -1,4 +1,4 @@
-"""Strict contracts for one-shot holistic interview evaluation."""
+"""Strict contracts for structured holistic interview evaluation."""
 
 from __future__ import annotations
 
@@ -208,6 +208,7 @@ class FinalEvaluationRecord(EvaluationModel):
     overall_technical_skill_score: float
     skill_summary: dict[str, str]
     skill_evidence: dict[str, list[str]]
+    question_evaluations: list[dict[str, Any]]
 
     behavioural_cultural_score: float
     behavioural_cultural_summary: str

@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -504,12 +505,112 @@ async def get_interview_transcript(
         total_elapsed_secs = session.total_elapsed_secs or 0
         for raw_turn in session.transcript:
             if isinstance(raw_turn, dict):
+                raw_metadata = raw_turn.get("metadata")
+                metadata: dict[str, Any] = (
+                    dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+                )
+                elapsed_value = metadata.get("elapsed_secs")
+                try:
+                    elapsed_secs = (
+                        max(0, int(elapsed_value))
+                        if elapsed_value is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    elapsed_secs = None
                 turns.append(
                     TranscriptTurn(
                         turn_number=int(raw_turn.get("turn_number", len(turns) + 1)),
+                        turn_id=(
+                            str(raw_turn["turn_id"])
+                            if raw_turn.get("turn_id")
+                            else None
+                        ),
                         speaker=str(raw_turn.get("speaker", "unknown")),
                         text=str(raw_turn.get("text", "")),
                         tone=raw_turn.get("tone"),
+                        timestamp=(
+                            str(raw_turn["timestamp"])
+                            if raw_turn.get("timestamp")
+                            else None
+                        ),
+                        elapsed_secs=elapsed_secs,
+                        question_id=(
+                            str(raw_turn["question_id"])
+                            if raw_turn.get("question_id")
+                            else (
+                                str(metadata["question_id"])
+                                if metadata.get("question_id")
+                                else None
+                            )
+                        ),
+                        section=(
+                            str(
+                                raw_turn.get("current_section")
+                                or raw_turn.get("section")
+                                or metadata.get("current_section")
+                                or metadata.get("section")
+                            )
+                            if (
+                                raw_turn.get("current_section")
+                                or raw_turn.get("section")
+                                or metadata.get("current_section")
+                                or metadata.get("section")
+                            )
+                            else None
+                        ),
+                        skill=(
+                            str(
+                                raw_turn.get("current_skill")
+                                or raw_turn.get("skill")
+                                or metadata.get("current_skill")
+                                or metadata.get("skill")
+                            )
+                            if (
+                                raw_turn.get("current_skill")
+                                or raw_turn.get("skill")
+                                or metadata.get("current_skill")
+                                or metadata.get("skill")
+                            )
+                            else None
+                        ),
+                        difficulty=(
+                            str(
+                                raw_turn.get("question_difficulty")
+                                or raw_turn.get("difficulty")
+                                or metadata.get("question_difficulty")
+                                or metadata.get("difficulty")
+                            )
+                            if (
+                                raw_turn.get("question_difficulty")
+                                or raw_turn.get("difficulty")
+                                or metadata.get("question_difficulty")
+                                or metadata.get("difficulty")
+                            )
+                            else None
+                        ),
+                        question_type=(
+                            str(
+                                raw_turn.get("question_type")
+                                or metadata.get("question_type")
+                            )
+                            if (
+                                raw_turn.get("question_type")
+                                or metadata.get("question_type")
+                            )
+                            else None
+                        ),
+                        response_type=(
+                            str(
+                                raw_turn.get("response_type")
+                                or metadata.get("response_type")
+                            )
+                            if (
+                                raw_turn.get("response_type")
+                                or metadata.get("response_type")
+                            )
+                            else None
+                        ),
                     )
                 )
 

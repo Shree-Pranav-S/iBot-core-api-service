@@ -15,6 +15,20 @@ class EvaluationSkillBreakdown(AppBaseModel):
     confidence: float
 
 
+class QuestionEvaluationBreakdown(AppBaseModel):
+    question_id: str
+    section: str
+    skill: str | None = None
+    difficulty: str
+    question_text: str
+    answered: bool
+    answer_summary: str
+    score: float
+    relevance_class: str
+    evidence: list[str] = Field(default_factory=list)
+    confidence: float
+
+
 class SectionCommunicationBreakdown(AppBaseModel):
     score: float
     summary: str
@@ -58,6 +72,9 @@ class InterviewEvaluationResponse(AppBaseModel):
     overall_technical_skill_score: float
     skill_summary: dict[str, str]
     skill_evidence: dict[str, list[str]]
+    question_evaluations: list[QuestionEvaluationBreakdown] = Field(
+        default_factory=list
+    )
 
     behavioural_cultural_score: float
     behavioural_cultural_summary: str

@@ -441,10 +441,26 @@ class CandidateService:
 
         existing_candidate = await self._candidate_repo.get_by_email(email)
         if existing_candidate is not None:
-            raise BadRequestException(
-                "A candidate with this email already exists. "
-                "Use Enroll to add them to another assessment."
+            existing_enrollments = await self._ca_repo.get_all_by_candidate_id(
+                existing_candidate.id
             )
+            if existing_enrollments:
+                raise BadRequestException(
+                    "A candidate with this email already exists. "
+                    "Use Enroll to add them to another assessment."
+                )
+
+            # Older delete flows could leave a candidate row behind after its final
+            # enrollment was removed. Such rows are not visible in the UI, but the
+            # global email constraint still blocks recreation until they are removed.
+            logger.warning(
+                "Removing orphan candidate before recreation",
+                extra={
+                    "candidate_id": str(existing_candidate.id),
+                    "email": existing_candidate.email,
+                },
+            )
+            await self._candidate_repo.delete_candidate(existing_candidate)
 
         candidate = await self._candidate_repo.create_candidate(
             full_name=name,

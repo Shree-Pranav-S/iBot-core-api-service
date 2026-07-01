@@ -333,6 +333,9 @@ class TestCreateSingleCandidate:
 
         assessment_repo.get_by_id.return_value = assessment
         candidate_repo.get_by_email.return_value = _candidate(recruiter_id=recruiter_id)
+        ca_repo.get_all_by_candidate_id.return_value = [
+            _enrollment(assessment=assessment)
+        ]
 
         with pytest.raises(BadRequestException, match="already exists"):
             await service.create_single_candidate(
@@ -345,6 +348,47 @@ class TestCreateSingleCandidate:
             )
 
         ca_repo.create.assert_not_awaited()
+
+    async def test_orphan_email_is_reclaimed_before_recreation(self) -> None:
+        service, candidate_repo, ca_repo, assessment_repo = _build_service()
+        recruiter_id = uuid.uuid4()
+        assessment = _assessment(recruiter_id=recruiter_id)
+        orphan = _candidate(recruiter_id=recruiter_id)
+        recreated = _candidate(recruiter_id=recruiter_id)
+        created_ca = SimpleNamespace(id=uuid.uuid4(), invitation_token=uuid.uuid4())
+
+        assessment_repo.get_by_id.return_value = assessment
+        candidate_repo.get_by_email.return_value = orphan
+        candidate_repo.create_candidate.return_value = recreated
+        ca_repo.get_all_by_candidate_id.return_value = []
+        ca_repo.get_by_candidate_and_assessment.return_value = None
+        ca_repo.create.return_value = created_ca
+
+        with (
+            patch(
+                "src.core.services.candidate_service.write_temporary_resume",
+                new_callable=AsyncMock,
+                return_value="/tmp/resume.pdf",
+            ),
+            patch("src.core.services.candidate_service.enqueue_invitation_email"),
+        ):
+            result = await service.create_single_candidate(
+                recruiter_id=recruiter_id,
+                name="Jane Doe",
+                email="jane@example.com",
+                assessment_id=assessment.id,
+                resume_file_bytes=b"%PDF",
+                resume_filename="resume.pdf",
+            )
+
+        assert result is created_ca
+        candidate_repo.delete_candidate.assert_awaited_once_with(orphan)
+        candidate_repo.create_candidate.assert_awaited_once_with(
+            full_name="Jane Doe",
+            email="jane@example.com",
+            created_by=recruiter_id,
+        )
+        ca_repo.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio

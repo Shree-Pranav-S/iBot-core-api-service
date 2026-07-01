@@ -70,9 +70,18 @@ class TranscriptTurn(AppBaseModel):
     """A single turn in the interview transcript."""
 
     turn_number: int
+    turn_id: str | None = None
     speaker: str
     text: str
     tone: str | None = None
+    timestamp: str | None = None
+    elapsed_secs: int | None = None
+    question_id: str | None = None
+    section: str | None = None
+    skill: str | None = None
+    difficulty: str | None = None
+    question_type: str | None = None
+    response_type: str | None = None
 
 
 class InterviewTranscriptResponse(AppBaseModel):
