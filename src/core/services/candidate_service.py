@@ -14,6 +14,7 @@ from src.core.exceptions import (
     NotFoundException,
 )
 from src.core.services.realtime_event_service import publish_recruiter_event
+from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.repositories.assessment_repository import AssessmentRepository
@@ -39,6 +40,21 @@ logger = logging.getLogger(__name__)
 # Required CSV column headers (case-insensitive)
 REQUIRED_COLUMNS = {"name", "email", "resume", "assessment_id"}
 
+COMPLETED_ENROLLMENT_STATUSES = frozenset({"COMPLETED", "EVALUATED"})
+
+
+def _find_reusable_resume_enrollment(
+    enrollments: list[CandidateAssessment],
+) -> CandidateAssessment | None:
+    """Return the most recent enrollment with a completed parsed resume."""
+    for enrollment in enrollments:
+        if (
+            enrollment.resume_parse_status == "COMPLETED"
+            and enrollment.resume_parsed is not None
+        ):
+            return enrollment
+    return None
+
 
 class CandidateService:
     """Service layer managing bulk CSV upload, role matching, and invitation dispatch."""
@@ -54,6 +70,32 @@ class CandidateService:
         self._ca_repo = ca_repo
         self._assessment_repo = assessment_repo
         self._event_logs_repo = event_logs_repo
+
+    async def _assert_no_window_overlap(
+        self,
+        candidate_id: uuid.UUID,
+        new_assessment: Assessment,
+    ) -> None:
+        """Block enrollment when an active assessment window overlaps the new one."""
+        all_enrollments = await self._ca_repo.get_all_by_candidate_id(candidate_id)
+        new_start = new_assessment.window_start
+        new_end = new_assessment.window_end
+
+        for enrollment in all_enrollments:
+            existing_assessment = enrollment.assessment
+            if existing_assessment is None:
+                continue
+
+            ex_start = existing_assessment.window_start
+            ex_end = existing_assessment.window_end
+            overlaps = new_start < ex_end and ex_start < new_end
+            if overlaps and enrollment.status not in COMPLETED_ENROLLMENT_STATUSES:
+                raise BadRequestException(
+                    f"Candidate already has an active enrollment in "
+                    f"'{existing_assessment.title}' (ID: {existing_assessment.id}) "
+                    f"whose interview window overlaps with the new assessment. "
+                    f"The candidate must complete that assessment first."
+                )
 
     async def get_candidates_for_assessment(
         self, assessment_id: uuid.UUID, recruiter_id: uuid.UUID
@@ -103,7 +145,7 @@ class CandidateService:
 
         # Load all assessments owned by this recruiter and build a UUID lookup map
         all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
-        assessment_map: dict[str, object] = {str(a.id): a for a in all_assessments}
+        assessment_map: dict[str, Assessment] = {str(a.id): a for a in all_assessments}
 
         total_rows = len(rows)
         upload_id = uuid.uuid4()
@@ -112,7 +154,9 @@ class CandidateService:
         successful_rows = 0
         failed_rows = 0
 
-        processed_ca_records: list[tuple[CandidateAssessment, object, str, str]] = []
+        processed_ca_records: list[
+            tuple[CandidateAssessment, Assessment, str, str]
+        ] = []
 
         for row_idx, raw_row in enumerate(rows, start=1):
             # Normalize keys
@@ -187,53 +231,56 @@ class CandidateService:
                 failed_rows += 1
                 continue
 
-            #  Upsert Candidate
+            # Create or enroll candidate for this assessment row
             try:
                 existing_candidate = await self._candidate_repo.get_by_email(email)
-                if existing_candidate is None:
+
+                existing_ca = None
+                if existing_candidate is not None:
+                    existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
+                        existing_candidate.id, matched_assessment.id
+                    )
+                    if existing_ca is not None:
+                        reason = "Candidate is already registered for this assessment."
+                        row_results.append(
+                            CSVRowResult(
+                                row=row_idx,
+                                email=email,
+                                status="failed",
+                                reason=reason,
+                            )
+                        )
+                        failure_events.append(
+                            EventLogCreate(
+                                event_name=EventName.CSV_ROW_FAILED,
+                                source_service=EventSource.CORE_API,
+                                correlation_id=str(upload_id),
+                                recruiter_id=recruiter_id,
+                                metadata={
+                                    "filename": filename,
+                                    "row_number": row_idx,
+                                    "email": email,
+                                    "assessment_id": assessment_id_str,
+                                    "reason_code": "CANDIDATE_ALREADY_REGISTERED",
+                                },
+                                error_message=reason,
+                            )
+                        )
+                        failed_rows += 1
+                        continue
+
+                    candidate = existing_candidate
+                    if name and candidate.full_name != name:
+                        candidate.full_name = name
+                        await self._candidate_repo.update_candidate(candidate)
+                else:
                     candidate = await self._candidate_repo.create_candidate(
                         full_name=name,
                         email=email,
                         created_by=recruiter_id,
                     )
-                else:
-                    candidate = existing_candidate
-                    if name and candidate.full_name != name:
-                        candidate.full_name = name
-                        await self._candidate_repo.update_candidate(candidate)
 
-                # Link to assessment (skip if already linked)
-                existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
-                    candidate.id, matched_assessment.id
-                )
-                if existing_ca is not None:
-                    reason = "Candidate is already registered for this assessment."
-                    row_results.append(
-                        CSVRowResult(
-                            row=row_idx,
-                            email=email,
-                            status="failed",
-                            reason=reason,
-                        )
-                    )
-                failure_events.append(
-                    EventLogCreate(
-                        event_name=EventName.CSV_ROW_FAILED,
-                        source_service=EventSource.CORE_API,
-                        correlation_id=str(upload_id),
-                        recruiter_id=recruiter_id,
-                        metadata={
-                            "filename": filename,
-                            "row_number": row_idx,
-                            "email": email,
-                            "assessment_id": assessment_id_str,
-                            "reason_code": "CANDIDATE_ALREADY_REGISTERED",
-                        },
-                        error_message=reason,
-                    )
-                )
-                failed_rows += 1
-                continue
+                await self._assert_no_window_overlap(candidate.id, matched_assessment)
 
                 ca_record = await self._ca_repo.create(
                     candidate_id=candidate.id,
@@ -255,6 +302,33 @@ class CandidateService:
                 )
                 successful_rows += 1
 
+            except BadRequestException as exc:
+                reason = str(exc)
+                row_results.append(
+                    CSVRowResult(
+                        row=row_idx,
+                        email=email,
+                        status="failed",
+                        reason=reason,
+                    )
+                )
+                failure_events.append(
+                    EventLogCreate(
+                        event_name=EventName.CSV_ROW_FAILED,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=str(upload_id),
+                        recruiter_id=recruiter_id,
+                        metadata={
+                            "filename": filename,
+                            "row_number": row_idx,
+                            "email": email,
+                            "assessment_id": assessment_id_str,
+                            "reason_code": "ROW_VALIDATION_FAILED",
+                        },
+                        error_message=reason,
+                    )
+                )
+                failed_rows += 1
             except Exception as exc:
                 logger.exception(
                     "Failed to process CSV row %d for email %s", row_idx, email
@@ -366,17 +440,19 @@ class CandidateService:
             )
 
         existing_candidate = await self._candidate_repo.get_by_email(email)
-        if existing_candidate is None:
-            candidate = await self._candidate_repo.create_candidate(
-                full_name=name,
-                email=email,
-                created_by=recruiter_id,
+        if existing_candidate is not None:
+            raise BadRequestException(
+                "A candidate with this email already exists. "
+                "Use Enroll to add them to another assessment."
             )
-        else:
-            candidate = existing_candidate
-            if name and candidate.full_name != name:
-                candidate.full_name = name
-                await self._candidate_repo.update_candidate(candidate)
+
+        candidate = await self._candidate_repo.create_candidate(
+            full_name=name,
+            email=email,
+            created_by=recruiter_id,
+        )
+
+        await self._assert_no_window_overlap(candidate.id, matched_assessment)
 
         existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
             candidate.id, matched_assessment.id
@@ -435,8 +511,10 @@ class CandidateService:
     async def get_unique_candidates_for_recruiter(
         self, recruiter_id: uuid.UUID
     ) -> list:
-        """Return unique candidate records (not per-assessment) created by this recruiter."""
-        return await self._candidate_repo.get_all_for_recruiter(recruiter_id)
+        """Return unique candidates enrolled in any of this recruiter's assessments."""
+        return await self._candidate_repo.get_distinct_by_recruiter_enrollments(
+            recruiter_id
+        )
 
     async def enroll_existing_candidate(
         self,
@@ -475,52 +553,53 @@ class CandidateService:
                 "Candidate is already registered for this assessment."
             )
 
-        # Time window conflict check
         all_enrollments = await self._ca_repo.get_all_by_candidate_id(candidate_id)
-        new_start = new_assessment.window_start
-        new_end = new_assessment.window_end
 
-        COMPLETED_STATUSES = {"COMPLETED", "EVALUATED"}
+        has_recruiter_enrollment = any(
+            enrollment.assessment is not None
+            and enrollment.assessment.recruiter_id == recruiter_id
+            for enrollment in all_enrollments
+        )
+        if not has_recruiter_enrollment and candidate.created_by != recruiter_id:
+            raise ForbiddenException(
+                "You do not have permission to enroll this candidate."
+            )
 
-        for enrollment in all_enrollments:
-            existing_assessment = enrollment.assessment
-            if existing_assessment is None:
-                continue
-            ex_start = existing_assessment.window_start
-            ex_end = existing_assessment.window_end
-            if (
-                ex_start is None
-                or ex_end is None
-                or new_start is None
-                or new_end is None
-            ):
-                continue
+        await self._assert_no_window_overlap(candidate_id, new_assessment)
 
-            # Windows overlap when one starts before the other ends
-            overlaps = new_start < ex_end and ex_start < new_end
-            if overlaps and enrollment.status not in COMPLETED_STATUSES:
-                raise BadRequestException(
-                    f"Candidate already has an active enrollment in "
-                    f"'{existing_assessment.title}' (ID: {existing_assessment.id}) "
-                    f"whose interview window overlaps with the new assessment. "
-                    f"The candidate must complete that assessment first."
-                )
+        reusable_enrollment = _find_reusable_resume_enrollment(all_enrollments)
 
-        # Determine resume path — reuse previous if none provided
         if resume_file_bytes and resume_filename:
             resume_path = resume_filename
+            resume_parse_status = "PENDING"
+            resume_parsed = None
+        elif reusable_enrollment is not None:
+            resume_path = reusable_enrollment.resume_file_path
+            resume_parse_status = "COMPLETED"
+            resume_parsed = reusable_enrollment.resume_parsed
         else:
-            # Find the most recent enrollment with a resume
             resume_path = "placeholder_resume.pdf"
             for enrollment in all_enrollments:
-                if enrollment.resume_file_path:
+                if (
+                    enrollment.resume_file_path
+                    and enrollment.resume_file_path != "placeholder_resume.pdf"
+                ):
                     resume_path = enrollment.resume_file_path
                     break
+            resume_parse_status = "PENDING"
+            resume_parsed = None
+            if resume_path == "placeholder_resume.pdf":
+                logger.warning(
+                    "Enrolling candidate %s without resume and no prior parsed resume",
+                    candidate_id,
+                )
 
         ca_record = await self._ca_repo.create(
             candidate_id=candidate_id,
             assessment_id=assessment_id,
             resume_file_path=resume_path,
+            resume_parse_status=resume_parse_status,
+            resume_parsed=resume_parsed,
         )
 
         invitation_link = (
@@ -603,7 +682,7 @@ class CandidateService:
     async def delete_candidate_from_assessment(
         self, ca_id: uuid.UUID, recruiter_id: uuid.UUID
     ) -> None:
-        """Validate recruiter ownership and delete the candidate assessment from database."""
+        """Delete a candidate assessment and remove the candidate if no enrollments remain."""
         ca = await self._ca_repo.get_by_id(ca_id)
         if ca is None:
             raise NotFoundException("Candidate registration not found.")
@@ -613,7 +692,16 @@ class CandidateService:
                 "You do not have permission to delete this candidate."
             )
 
+        candidate_id = ca.candidate_id
         await self._ca_repo.delete(ca)
+
+        remaining_enrollments = await self._ca_repo.get_all_by_candidate_id(
+            candidate_id
+        )
+        if not remaining_enrollments:
+            candidate = await self._candidate_repo.get_by_id(candidate_id)
+            if candidate is not None:
+                await self._candidate_repo.delete_candidate(candidate)
 
     async def process_candidate_resume_in_background(
         self, ca_record_id, resume_url=None, temp_file_path=None

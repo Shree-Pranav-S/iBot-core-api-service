@@ -6,7 +6,9 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate import Candidate
+from src.data.models.postgres.candidate_assessment import CandidateAssessment
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +60,30 @@ class CandidateRepository:
         result = await self._session.execute(statement)
         return list(result.scalars().all())
 
+    async def get_distinct_by_recruiter_enrollments(
+        self, recruiter_id: uuid.UUID
+    ) -> list[Candidate]:
+        """Return distinct candidates linked to any assessment owned by the recruiter."""
+        statement = (
+            select(Candidate)
+            .join(CandidateAssessment, CandidateAssessment.candidate_id == Candidate.id)
+            .join(Assessment, CandidateAssessment.assessment_id == Assessment.id)
+            .where(Assessment.recruiter_id == recruiter_id)
+            .distinct()
+            .order_by(Candidate.full_name.asc())
+        )
+        result = await self._session.execute(statement)
+        return list(result.scalars().all())
+
     async def update_candidate(self, candidate: Candidate) -> Candidate:
         """Update and flush an existing candidate record."""
         self._session.add(candidate)
         await self._session.flush()
         logger.info("Candidate updated", extra={"candidate_id": str(candidate.id)})
         return candidate
+
+    async def delete_candidate(self, candidate: Candidate) -> None:
+        """Delete a candidate record when they have no remaining enrollments."""
+        await self._session.delete(candidate)
+        await self._session.flush()
+        logger.info("Candidate deleted", extra={"candidate_id": str(candidate.id)})

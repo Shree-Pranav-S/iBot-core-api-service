@@ -117,6 +117,8 @@ class CandidateAssessmentRepository:
         candidate_id: uuid.UUID,
         assessment_id: uuid.UUID,
         resume_file_path: str,
+        resume_parse_status: str = "PENDING",
+        resume_parsed: dict | None = None,
     ) -> CandidateAssessment:
         """Create and flush a new candidate-assessment link."""
         ca = CandidateAssessment(
@@ -124,7 +126,8 @@ class CandidateAssessmentRepository:
             assessment_id=assessment_id,
             resume_file_path=resume_file_path,
             status="INVITED",
-            resume_parse_status="PENDING",
+            resume_parse_status=resume_parse_status,
+            resume_parsed=resume_parsed,
             recruiter_decision="PENDING",
         )
         self._session.add(ca)
