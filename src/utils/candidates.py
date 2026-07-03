@@ -22,6 +22,83 @@ from src.config.settings import settings
 logger = logging.getLogger(__name__)
 
 
+async def generate_rejection_feedback(
+    *,
+    candidate_name: str,
+    role_name: str,
+    assessment_title: str,
+    overall_summary: str,
+    recommendation_reasoning: str,
+    strengths: list[str],
+    concerns: list[str],
+) -> str:
+    """Generate a concise, candidate-facing rejection feedback draft."""
+    first_name = (
+        candidate_name.strip().split()[0] if candidate_name.strip() else "there"
+    )
+    primary_strength = (
+        strengths[0].strip()
+        if strengths
+        else "the time and preparation you brought to the interview"
+    )
+    primary_concern = (
+        concerns[0].strip()
+        if concerns
+        else "showing more specific evidence and depth in future interview responses"
+    )
+    fallback = (
+        f"Thank you for the time and thought you put into the {role_name} interview, "
+        f"{first_name}. We appreciated {primary_strength.rstrip('.').lower()}. "
+        "After reviewing the interview evidence, we have decided not to move forward "
+        "with your application at this stage. For future opportunities, we encourage "
+        f"you to focus on {primary_concern.rstrip('.').lower()}. "
+        "We appreciate your interest and wish you the best in your search."
+    )
+
+    if not settings.GROQ_API_KEY and not settings.FALLBACK_GROQ_API_KEY:
+        return fallback[:2000]
+
+    system_prompt = (
+        "You are an expert recruiting communications assistant. Write a warm, "
+        "specific, candidate-facing rejection feedback paragraph using only the "
+        "provided interview evidence. Keep it between 70 and 120 words. Mention one "
+        "genuine strength and one or two constructive development areas. Do not mention "
+        "scores, AI, models, internal recommendations, policy, integrity flags, or hidden "
+        "evaluation criteria. Do not make promises or invite debate. Return only the "
+        "feedback paragraph with no heading, bullets, or quotation marks."
+    )
+    user_prompt = (
+        f"Candidate: {candidate_name}\n"
+        f"Role: {role_name}\n"
+        f"Assessment: {assessment_title}\n"
+        f"Overall summary: {overall_summary}\n"
+        f"Recommendation reasoning: {recommendation_reasoning}\n"
+        f"Strengths: {'; '.join(strengths[:4]) or 'Not specified'}\n"
+        f"Development areas: {'; '.join(concerns[:4]) or 'Not specified'}"
+    )
+
+    api_keys = [settings.GROQ_API_KEY, settings.FALLBACK_GROQ_API_KEY]
+    for api_key in dict.fromkeys(key for key in api_keys if key):
+        try:
+            client = AsyncGroq(api_key=api_key)
+            completion = await client.chat.completions.create(
+                model=settings.GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.35,
+                max_tokens=240,
+            )
+            draft = (completion.choices[0].message.content or "").strip()
+            if draft:
+                return draft[:2000]
+        except Exception:
+            logger.exception("AI rejection feedback generation failed")
+
+    return fallback[:2000]
+
+
 def temporary_resume_path(candidate_assessment_id: uuid.UUID) -> Path:
     """Return the configured runtime path for a temporary resume."""
     return Path(settings.TEMP_RESUME_DIR) / f"{candidate_assessment_id}.pdf"

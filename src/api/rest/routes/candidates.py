@@ -18,6 +18,7 @@ from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
 from src.core.exceptions import AuthenticationException, BadRequestException
 from src.core.services.candidate_service import CandidateService
 from src.schemas.candidate import (
+    AIRejectionFeedbackResponse,
     BulkUploadResponse,
     CandidateAssessmentListItem,
     ExistingCandidateListItem,
@@ -32,6 +33,7 @@ from src.schemas.evaluation import (
     InterviewEvaluationResponse,
     RecruiterEvaluationListItem,
 )
+from src.utils.candidates import generate_rejection_feedback
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -363,6 +365,57 @@ async def list_recruiter_evaluations(
     return APIResponse(
         message="Evaluations retrieved successfully.",
         data=data,
+    )
+
+
+@router.post(
+    "/{ca_id}/rejection-feedback",
+    response_model=APIResponse[AIRejectionFeedbackResponse],
+    summary="Generate rejection feedback",
+    description="Draft editable, candidate-facing rejection feedback from evaluation evidence.",
+)
+async def create_rejection_feedback(
+    ca_id: uuid.UUID,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
+) -> APIResponse[AIRejectionFeedbackResponse]:
+    """Generate a recruiter-editable rejection feedback draft."""
+    if not x_user_id:
+        raise AuthenticationException("Missing identity header.")
+
+    try:
+        recruiter_id = uuid.UUID(x_user_id)
+    except ValueError:
+        raise BadRequestException("Invalid X-User-Id header format.")
+
+    ca = await unit_of_work.candidate_assessments.get_by_id(ca_id)
+    if ca is None:
+        from src.core.exceptions import NotFoundException
+
+        raise NotFoundException("Candidate registration not found.")
+    if ca.assessment.recruiter_id != recruiter_id:
+        from src.core.exceptions import ForbiddenException
+
+        raise ForbiddenException("You do not have access to this evaluation.")
+
+    evaluation = await unit_of_work.evaluations.get_by_candidate_assessment_id(ca_id)
+    if evaluation is None:
+        from src.core.exceptions import NotFoundException
+
+        raise NotFoundException("Evaluation not found for this candidate.")
+
+    feedback = await generate_rejection_feedback(
+        candidate_name=ca.candidate.full_name if ca.candidate else "Candidate",
+        role_name=ca.assessment.role_name,
+        assessment_title=ca.assessment.title,
+        overall_summary=evaluation.overall_summary,
+        recommendation_reasoning=evaluation.recommendation_reasoning,
+        strengths=list(evaluation.strengths or []),
+        concerns=list(evaluation.concerns or []),
+    )
+    return APIResponse(
+        message="Rejection feedback draft generated successfully.",
+        data=AIRejectionFeedbackResponse(feedback=feedback),
     )
 
 

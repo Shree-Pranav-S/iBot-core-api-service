@@ -190,6 +190,12 @@ class RecruiterDecisionResponse(ORMBaseModel):
     updated_at: datetime
 
 
+class AIRejectionFeedbackResponse(AppBaseModel):
+    """AI-assisted, recruiter-editable rejection feedback draft."""
+
+    feedback: str
+
+
 # Token validation schema (candidate-facing)
 
 

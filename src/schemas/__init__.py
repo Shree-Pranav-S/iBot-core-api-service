@@ -24,6 +24,7 @@ from src.schemas.auth import (
     TokenResponse,
 )
 from src.schemas.candidate import (
+    AIRejectionFeedbackResponse,
     BulkUploadResponse,
     CandidateAssessmentListItem,
     CandidateAssessmentResponse,
@@ -74,6 +75,7 @@ __all__ = [
     "InterviewPlan",
     "FocusAreaOverride",
     # candidate
+    "AIRejectionFeedbackResponse",
     "CandidateResponse",
     "BulkUploadResponse",
     "CSVRowResult",
