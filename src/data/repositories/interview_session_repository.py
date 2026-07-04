@@ -43,6 +43,7 @@ class InterviewSessionRepository:
     """Read and mutate interview state through one injected session."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def get_session_by_candidate_assessment_id(

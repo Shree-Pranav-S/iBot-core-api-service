@@ -6,12 +6,18 @@ import logging
 import secrets
 import uuid
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.core.exceptions import AuthenticationException, ForbiddenException
+from src.data.clients.postgres_client import async_session_scope
+from src.data.repositories.candidate_session_repository import (
+    CandidateSessionRepository,
+)
 from src.data.repositories.event_logs_repository import EventLogsRepository
-from src.data.repositories.unit_of_work import UnitOfWork
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.schemas.internal_interview import (
     CandidateConnectionContext,
@@ -19,6 +25,7 @@ from src.schemas.internal_interview import (
 )
 
 logger = logging.getLogger(__name__)
+SessionScopeFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 RECONNECT_WINDOW = timedelta(minutes=5)
 TERMINAL_SESSION_STATUSES = {
     "COMPLETED",
@@ -56,9 +63,10 @@ class InterviewSessionService:
 
     def __init__(
         self,
-        unit_of_work_factory: Callable[[], UnitOfWork] = UnitOfWork,
+        session_scope_factory: SessionScopeFactory = async_session_scope,
     ) -> None:
-        self._unit_of_work_factory = unit_of_work_factory
+        """Initialize the session service with a transaction-scoped session factory."""
+        self._session_scope_factory = session_scope_factory
 
     @staticmethod
     async def _record(
@@ -114,9 +122,9 @@ class InterviewSessionService:
 
         rejection: Exception | None = None
         response: CandidateSessionBootstrapResponse | None = None
-        async with self._unit_of_work_factory() as unit_of_work:
-            repository = unit_of_work.candidate_sessions
-            event_repository = unit_of_work.event_logs
+        async with self._session_scope_factory() as session:
+            repository = CandidateSessionRepository(session)
+            event_repository = EventLogsRepository(session)
             context = await repository.lock_invitation_context(invitation_token)
 
             if not context:
@@ -130,14 +138,14 @@ class InterviewSessionService:
                 rejection = AuthenticationException("Invalid interview invitation.")
             else:
                 candidate_assessment_id = context["candidate_assessment_id"]
-                session = await repository.get_or_create_session_for_update(
+                candidate_session = await repository.get_or_create_session_for_update(
                     candidate_assessment_id
                 )
-                session_status = str(session.get("status") or "").upper()
+                session_status = str(candidate_session.get("status") or "").upper()
                 candidate_status = str(
                     context.get("candidate_assessment_status") or ""
                 ).upper()
-                correlation_id = str(session["id"])
+                correlation_id = str(candidate_session["id"])
 
                 if (
                     session_status in TERMINAL_SESSION_STATUSES
@@ -159,9 +167,11 @@ class InterviewSessionService:
                     )
                 else:
                     now = _utc_now()
-                    expires_at = _aware(session.get("session_token_expires_at"))
+                    expires_at = _aware(
+                        candidate_session.get("session_token_expires_at")
+                    )
                     invite_consumed = bool(context.get("invite_consumed"))
-                    existing_token = str(session.get("session_token") or "")
+                    existing_token = str(candidate_session.get("session_token") or "")
 
                     if invite_consumed and expires_at is not None and expires_at <= now:
                         await self._record(
@@ -194,11 +204,11 @@ class InterviewSessionService:
                             )
                             existing_token = secrets.token_urlsafe(48)
                             await repository.set_session_credentials(
-                                session["id"],
+                                candidate_session["id"],
                                 session_token=existing_token,
                                 expires_at=expires_at,
                             )
-                            session.update(
+                            candidate_session.update(
                                 {
                                     "session_token": existing_token,
                                     "session_token_expires_at": expires_at,
@@ -227,7 +237,7 @@ class InterviewSessionService:
                         )
                         response = self._bootstrap_response(
                             context,
-                            session,
+                            candidate_session,
                             invite_reissued=invite_reissued,
                         )
 
@@ -245,19 +255,19 @@ class InterviewSessionService:
 
         rejection: Exception | None = None
         response: CandidateSessionBootstrapResponse | None = None
-        async with self._unit_of_work_factory() as unit_of_work:
-            repository = unit_of_work.candidate_sessions
+        async with self._session_scope_factory() as session:
+            repository = CandidateSessionRepository(session)
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
             if rejection is None:
-                session = {
+                candidate_session = {
                     **context,
                     "id": context["session_id"],
                     "status": context["session_status"],
                 }
                 response = self._bootstrap_response(
                     context,
-                    session,
+                    candidate_session,
                     invite_reissued=False,
                 )
 
@@ -293,9 +303,9 @@ class InterviewSessionService:
 
         rejection: Exception | None = None
         response: CandidateConnectionContext | None = None
-        async with self._unit_of_work_factory() as unit_of_work:
-            repository = unit_of_work.candidate_sessions
-            event_repository = unit_of_work.event_logs
+        async with self._session_scope_factory() as session:
+            repository = CandidateSessionRepository(session)
+            event_repository = EventLogsRepository(session)
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
 
@@ -417,8 +427,8 @@ class InterviewSessionService:
 
         rejection: Exception | None = None
         context: dict[str, Any] = {}
-        async with self._unit_of_work_factory() as unit_of_work:
-            repository = unit_of_work.candidate_sessions
+        async with self._session_scope_factory() as session:
+            repository = CandidateSessionRepository(session)
             context = await repository.lock_session_context_by_token(session_token)
             rejection = self._validate_active_token(context)
             if (
@@ -446,9 +456,9 @@ class InterviewSessionService:
 
         reconnect_deadline = _utc_now() + RECONNECT_WINDOW
         outcome: dict[str, Any] = {}
-        async with self._unit_of_work_factory() as unit_of_work:
-            repository = unit_of_work.candidate_sessions
-            event_repository = unit_of_work.event_logs
+        async with self._session_scope_factory() as session:
+            repository = CandidateSessionRepository(session)
+            event_repository = EventLogsRepository(session)
             outcome = await repository.record_disconnect(
                 session_id,
                 connection_id=connection_id,

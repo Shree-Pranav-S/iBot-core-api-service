@@ -1,17 +1,19 @@
 """Internal API endpoints."""
 
-import logging
 import uuid
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
+from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import NotFoundException
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
+)
 from src.schemas.candidate import CandidateTokenValidationResponse
 from src.schemas.common import APIResponse
 
 router = APIRouter(prefix="/internal", tags=["internal"])
-logger = logging.getLogger(__name__)
 
 
 @router.get(
@@ -22,12 +24,12 @@ logger = logging.getLogger(__name__)
 )
 async def validate_candidate_token(
     token: uuid.UUID,
-    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
+    db: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[CandidateTokenValidationResponse]:
     """Validate token and return candidate and assessment identifiers."""
-    candidate_assessment = (
-        await unit_of_work.candidate_assessments.get_by_invitation_token(token)
-    )
+    candidate_assessment = await CandidateAssessmentRepository(
+        db
+    ).get_by_invitation_token(token)
     if candidate_assessment is None:
         raise NotFoundException("Candidate invitation token not found.")
 

@@ -1,13 +1,11 @@
 """
 Common schemas.
 
-Generic response envelopes, pagination helpers, and the health check
-response used across the entire core-api.
+Generic response envelopes and the health check response used across
+the entire core-api.
 """
 
 from typing import Generic, TypeVar
-
-from pydantic import Field
 
 from src.schemas.base import AppBaseModel
 
@@ -32,16 +30,6 @@ class APIResponse(AppBaseModel, Generic[T]):
     success: bool = True
     message: str = "OK"
     data: T | None = None
-
-
-class PaginatedResponse(AppBaseModel, Generic[T]):
-    """Paginated list response."""
-
-    items: list[T]
-    total: int
-    page: int = Field(..., ge=1)
-    page_size: int = Field(..., ge=1, le=100)
-    total_pages: int
 
 
 # ── Error response ────────────────────────────────────────────────────────────

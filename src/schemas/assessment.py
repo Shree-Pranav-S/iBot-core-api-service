@@ -85,6 +85,7 @@ class TechnicalInterviewSection(AppBaseModel):
 
     @model_validator(mode="after")
     def validate_technical_section(self) -> "TechnicalInterviewSection":
+        """Validate technical section naming invariants."""
         if self.section_name in {"self_intro", "behavioural_cultural"}:
             raise ValueError(
                 "Technical section_name cannot be self_intro or behavioural_cultural."
@@ -213,6 +214,7 @@ class AssessmentCreateRequest(AppBaseModel):
 
     @model_validator(mode="after")
     def window_order(self) -> "AssessmentCreateRequest":
+        """Validate that the interview window end is after the start."""
         if self.window_end <= self.window_start:
             raise ValueError("window_end must be after window_start.")
         return self
@@ -234,6 +236,7 @@ class AssessmentCreateForm:
             description='Expecting JSON string: \'[{"skill": "Python", "weight_override": 8.0}]\'',
         ),
     ):
+        """Parse multipart assessment creation fields into a request payload."""
         focus_areas_list: list[FocusAreaOverride] = []
 
         if focus_areas:

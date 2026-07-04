@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
 
 class CandidateAssessment(TimestampMixin, Base):
+    """SQLAlchemy model linking candidates to assessments."""
+
     __tablename__ = "candidate_assessments"
     __table_args__ = (
         UniqueConstraint(

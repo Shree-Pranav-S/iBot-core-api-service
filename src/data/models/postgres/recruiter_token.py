@@ -10,6 +10,8 @@ from src.data.models.postgres.base import Base
 
 
 class RecruiterToken(Base):
+    """SQLAlchemy model for hashed recruiter refresh tokens."""
+
     __tablename__ = "recruiter_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(

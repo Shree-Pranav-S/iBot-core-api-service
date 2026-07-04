@@ -38,6 +38,7 @@ async def stream_recruiter_events(
         raise BadRequestException("Invalid X-User-Id header format.")
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        """Yield recruiter dashboard events and keep-alives as SSE frames."""
         pubsub = redis_client.pubsub()
         channel = recruiter_event_channel(recruiter_id)
         await pubsub.subscribe(channel)

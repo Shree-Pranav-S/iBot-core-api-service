@@ -12,6 +12,7 @@ class JsonLogFormatter(logging.Formatter):
     """Small stdlib JSON formatter for application logs."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record as a JSON object string."""
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,

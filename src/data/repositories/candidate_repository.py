@@ -17,6 +17,7 @@ class CandidateRepository:
     """Data access layer for creating and retrieving candidate records."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def get_by_email(self, email: str) -> Candidate | None:
@@ -49,16 +50,6 @@ class CandidateRepository:
         await self._session.refresh(candidate)
         logger.info("Candidate created", extra={"candidate_id": str(candidate.id)})
         return candidate
-
-    async def get_all_for_recruiter(self, recruiter_id: uuid.UUID) -> list[Candidate]:
-        """Return all candidates created by this recruiter."""
-        statement = (
-            select(Candidate)
-            .where(Candidate.created_by == recruiter_id)
-            .order_by(Candidate.full_name.asc())
-        )
-        result = await self._session.execute(statement)
-        return list(result.scalars().all())
 
     async def get_distinct_by_recruiter_enrollments(
         self, recruiter_id: uuid.UUID

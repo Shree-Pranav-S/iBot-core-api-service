@@ -9,6 +9,8 @@ from src.schemas.base import AppBaseModel
 
 
 class EvaluationSkillBreakdown(AppBaseModel):
+    """Score breakdown for one evaluated technical skill."""
+
     score: float
     priority_score: float
     questions_evaluated: int
@@ -16,6 +18,8 @@ class EvaluationSkillBreakdown(AppBaseModel):
 
 
 class QuestionEvaluationBreakdown(AppBaseModel):
+    """Per-question scoring and evidence returned in an evaluation report."""
+
     question_id: str
     section: str
     skill: str | None = None
@@ -30,12 +34,16 @@ class QuestionEvaluationBreakdown(AppBaseModel):
 
 
 class SectionCommunicationBreakdown(AppBaseModel):
+    """Communication score details for one interview section."""
+
     score: float
     summary: str
     evidence: list[str] = Field(default_factory=list)
 
 
 class SeverityCounts(AppBaseModel):
+    """Counts of violations grouped by severity."""
+
     low: int
     medium: int
     high: int
@@ -43,6 +51,8 @@ class SeverityCounts(AppBaseModel):
 
 
 class ViolationSummary(AppBaseModel):
+    """Summary of validated proctoring or integrity violations."""
+
     has_violation: bool
     validated_violation_count: int
     severity_counts: SeverityCounts

@@ -47,33 +47,9 @@ class EvaluationModel(BaseModel):
             return value
 
 
-class EvaluationCandidateContext(EvaluationModel):
-    candidate_assessment_id: str
-    session_id: str
-    assessment_id: str
-    candidate_name: str
-    candidate_email: str | None = None
-    assessment_title: str
-    role_name: str
-    company_name: str
-    inferred_difficulty: str
-    interview_duration_mins: int
-    total_elapsed_secs: int
-
-
-class EvaluationInput(EvaluationModel):
-    """Complete immutable context sent to the evaluator in one request."""
-
-    evaluation_schema_version: str
-    transcript_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    candidate: EvaluationCandidateContext
-    jd_analysis: dict[str, Any]
-    interview_plan: dict[str, Any]
-    transcript: list[dict[str, Any]] = Field(min_length=1)
-    violations: list[dict[str, Any]]
-
-
 class SkillScoreOutput(EvaluationModel):
+    """Validated LLM score details for one technical skill."""
+
     score: float = Field(ge=0.0, le=10.0)
     priority_score: float = Field(ge=0.0, le=10.0)
     questions_evaluated: int = Field(ge=0)
@@ -81,18 +57,24 @@ class SkillScoreOutput(EvaluationModel):
 
 
 class SectionCommunicationOutput(EvaluationModel):
+    """Validated LLM communication details for one section."""
+
     score: float = Field(ge=0.0, le=10.0)
     summary: str = Field(min_length=1, max_length=1800)
     evidence: list[str] = Field(default_factory=list, max_length=16)
 
 
 class SectionCommunicationScores(EvaluationModel):
+    """Validated communication scores grouped by interview section."""
+
     self_intro: SectionCommunicationOutput
     technical: SectionCommunicationOutput
     behavioural_cultural: SectionCommunicationOutput
 
 
 class SeverityCounts(EvaluationModel):
+    """Validated counts of violations grouped by severity."""
+
     low: int = Field(ge=0)
     medium: int = Field(ge=0)
     high: int = Field(ge=0)
@@ -100,10 +82,13 @@ class SeverityCounts(EvaluationModel):
 
     @property
     def total(self) -> int:
+        """Return the total number of validated violations."""
         return self.low + self.medium + self.high + self.critical
 
 
 class ViolationSummaryOutput(EvaluationModel):
+    """Validated violation summary emitted by the evaluator."""
+
     has_violation: bool
     validated_violation_count: int = Field(ge=0)
     severity_counts: SeverityCounts
@@ -111,6 +96,7 @@ class ViolationSummaryOutput(EvaluationModel):
 
     @model_validator(mode="after")
     def validate_counts(self) -> ViolationSummaryOutput:
+        """Ensure violation count fields are internally consistent."""
         if self.severity_counts.total != self.validated_violation_count:
             raise ValueError("severity_counts must sum to validated_violation_count")
         if self.has_violation != (self.validated_violation_count > 0):
@@ -163,6 +149,7 @@ class HolisticEvaluationLLMOutput(EvaluationModel):
     def validate_evidence_and_skill_maps(
         self,
     ) -> HolisticEvaluationLLMOutput:
+        """Ensure skill maps and evidence satisfy evaluator invariants."""
         score_keys = set(self.skill_scores)
         if set(self.skill_summary) != score_keys:
             raise ValueError("skill_summary keys must exactly match skill_scores keys")

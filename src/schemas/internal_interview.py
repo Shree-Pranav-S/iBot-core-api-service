@@ -13,14 +13,20 @@ from src.schemas.evaluation_llm import FinalEvaluationRecord
 
 
 class CandidateSessionEntryRequest(AppBaseModel):
+    """Request to enter an interview session with an invitation token."""
+
     invitation_token: uuid.UUID
 
 
 class CandidateSessionContextRequest(AppBaseModel):
+    """Request carrying a candidate session token."""
+
     session_token: str = Field(min_length=32, max_length=255)
 
 
 class CandidateSessionBootstrapResponse(AppBaseModel):
+    """Bootstrap context returned after candidate session entry."""
+
     session_token: str
     session_token_expires_at: datetime
     session_status: str
@@ -38,6 +44,8 @@ class CandidateSessionBootstrapResponse(AppBaseModel):
 
 
 class CandidateConnectionContext(AppBaseModel):
+    """Authorized connection context for the interview engine."""
+
     session_id: uuid.UUID
     connection_id: str
     candidate_assessment_id: uuid.UUID
@@ -50,6 +58,8 @@ class CandidateConnectionContext(AppBaseModel):
 
 
 class RecordDisconnectRequest(AppBaseModel):
+    """Request to record a candidate disconnect."""
+
     session_id: uuid.UUID
     connection_id: str
     candidate_assessment_id: uuid.UUID
@@ -58,33 +68,47 @@ class RecordDisconnectRequest(AppBaseModel):
 
 
 class InitializeGraphContextRequest(AppBaseModel):
+    """Request to initialize graph context for a candidate assessment."""
+
     candidate_assessment_id: uuid.UUID
 
 
 class InitializeGraphContextResponse(AppBaseModel):
+    """Response containing interview context and session state."""
+
     context: dict[str, Any]
     session: dict[str, Any]
 
 
 class PersistTurnRequest(AppBaseModel):
+    """Request to persist transcript turns and violations for a session."""
+
     transcript_items: list[dict[str, Any]] = Field(default_factory=list)
     violations: list[dict[str, Any]] = Field(default_factory=list)
     elapsed_secs: int | None = None
 
 
 class CompleteSessionRequest(AppBaseModel):
+    """Request to complete an interview session."""
+
     total_elapsed_secs: int
 
 
 class SaveFinalEvaluationRequest(AppBaseModel):
+    """Request to persist a final interview evaluation."""
+
     record: FinalEvaluationRecord
     recruiter_email: str
 
 
 class SaveFinalEvaluationResponse(AppBaseModel):
+    """Response metadata for a persisted final evaluation."""
+
     id: uuid.UUID
     sent_at: datetime
 
 
 class MarkTimerStartedResponse(AppBaseModel):
+    """Response containing the timestamp when the timer started."""
+
     started_at: datetime

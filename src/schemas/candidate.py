@@ -56,16 +56,6 @@ class ExistingCandidateListItem(AppBaseModel):
     email: str
 
 
-class EnrollCandidateResponse(AppBaseModel):
-    """Response for enrolling an existing candidate into a new assessment."""
-
-    candidate_assessment_id: uuid.UUID
-    candidate_id: uuid.UUID
-    full_name: str
-    email: str
-    status: str
-
-
 class TranscriptTurn(AppBaseModel):
     """A single turn in the interview transcript."""
 
@@ -92,19 +82,6 @@ class InterviewTranscriptResponse(AppBaseModel):
     assessment_title: str | None = None
     total_elapsed_secs: int = 0
     turns: list[TranscriptTurn]
-
-
-# Candidate response schemas
-
-
-class CandidateResponse(ORMBaseModel):
-    """Candidate record as returned by the API."""
-
-    id: uuid.UUID
-    full_name: str
-    email: str
-    created_by: uuid.UUID
-    created_at: datetime
 
 
 # CandidateAssessment schemas
@@ -148,24 +125,6 @@ class CandidateAssessmentListItem(ORMBaseModel):
             resume_file_path=ca.resume_file_path,
             jd_text=ca.assessment.jd_text if ca.assessment else "",
         )
-
-
-class CandidateAssessmentResponse(ORMBaseModel):
-    """Full candidate-assessment record."""
-
-    id: uuid.UUID
-    candidate_id: uuid.UUID
-    assessment_id: uuid.UUID
-    resume_file_path: str
-    resume_parse_status: str
-    status: str
-    interview_started_at: datetime | None
-    interview_ended_at: datetime | None
-    recruiter_decision: str
-    recruiter_feedback: str | None
-    reminders_sent: dict
-    created_at: datetime
-    updated_at: datetime
 
 
 # Recruiter decision schema

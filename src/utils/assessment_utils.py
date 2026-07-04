@@ -1,6 +1,7 @@
 """Utility helpers for JD parsing and analysis."""
 
 import asyncio
+import json
 import logging
 import re
 
@@ -30,6 +31,7 @@ async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
     import fitz
 
     def extract_text() -> str:
+        """Extract text from uploaded PDF job description bytes."""
         text = ""
         with fitz.open(stream=file_bytes, filetype="pdf") as doc:
             for page in doc:
@@ -74,6 +76,19 @@ def _technical_signal_map(plan: InterviewPlan) -> dict[str, list[str]]:
     return signals
 
 
+def _unique_signals(signals: list[str]) -> list[str]:
+    """Clean, deduplicate, and preserve order of case-insensitive expected signals."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for signal in signals:
+        cleaned = str(signal).strip()
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            unique.append(cleaned)
+            seen.add(key)
+    return unique
+
+
 def _behavioural_signals(plan: InterviewPlan, jd_analysis: JDAnalysis) -> list[str]:
     generated: list[str] = []
     for section in plan.sections:
@@ -92,16 +107,7 @@ def _behavioural_signals(plan: InterviewPlan, jd_analysis: JDAnalysis) -> list[s
         ]
     )
 
-    unique: list[str] = []
-    seen: set[str] = set()
-    for signal in generated:
-        cleaned = str(signal).strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            unique.append(cleaned)
-            seen.add(key)
-
-    selected = unique[:4]
+    selected = _unique_signals(generated)[:4]
     has_culture_signal = any(
         marker in signal.casefold()
         for signal in selected
@@ -127,15 +133,7 @@ def _technical_expected_signals(
             f"Ability to apply {skill} in practical role-relevant scenarios",
         ]
     )
-    unique: list[str] = []
-    seen: set[str] = set()
-    for signal in generated:
-        cleaned = str(signal).strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            unique.append(cleaned)
-            seen.add(key)
-    return unique[:4]
+    return _unique_signals(generated)[:4]
 
 
 def _focus_weights(
@@ -294,7 +292,6 @@ def _normalize_interview_plan(
 def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
     if not focus_areas:
         return "[]"
-    import json
 
     return json.dumps([item.model_dump() for item in focus_areas], ensure_ascii=True)
 
@@ -715,7 +712,6 @@ async def run_jd_analysis_and_interview_plan(
     groq_client: AsyncGroq,
 ) -> JDAnalysisAndInterviewPlan:
     """Call Groq once to produce both JD analysis and the executable interview plan."""
-    import json
 
     user_prompt = (
         f"Interview duration: {duration_mins} minutes\n"

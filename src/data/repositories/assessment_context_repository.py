@@ -23,6 +23,7 @@ class AssessmentContextRepository:
     """Load and update assessment context in one caller-owned transaction."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def load_interview_context(

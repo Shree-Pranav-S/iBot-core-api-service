@@ -14,12 +14,14 @@ class NotificationService:
     """Build recruiter-facing notifications from persisted delivery records."""
 
     def __init__(self, repository: NotificationLogRepository) -> None:
+        """Initialize the notification service with its repository."""
         self._repository = repository
 
     async def list_for_recruiter(
         self,
         recruiter_id: uuid.UUID,
     ) -> list[RecruiterDashboardNotification]:
+        """Return dashboard notifications visible to a recruiter."""
         rows = await self._repository.list_report_ready_for_recruiter(recruiter_id)
         return [
             RecruiterDashboardNotification(

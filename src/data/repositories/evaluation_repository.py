@@ -31,6 +31,7 @@ class EvaluationRepository:
     """Data access layer for interview_evaluation records."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def get_by_candidate_assessment_id(

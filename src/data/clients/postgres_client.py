@@ -1,5 +1,6 @@
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 from src.config.settings import settings
 
 _engine: AsyncEngine | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
 logger = logging.getLogger(__name__)
 AfterCommitCallback = Callable[[], None]
 _AFTER_COMMIT_CALLBACKS_KEY = "after_commit_callbacks"
@@ -33,6 +35,7 @@ def run_after_commit_callbacks(session: AsyncSession) -> None:
 
 
 async def get_or_create_engine() -> AsyncEngine:
+    """Return the shared async database engine, creating it on first use."""
     global _engine
 
     if _engine is None:
@@ -56,15 +59,45 @@ async def get_or_create_engine() -> AsyncEngine:
 
 async def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """Creates an async session factory."""
+    global _session_factory
+
+    if _session_factory is not None:
+        return _session_factory
+
     engine = await get_or_create_engine()
-    SessionLocal = async_sessionmaker(
+    _session_factory = async_sessionmaker(
         bind=engine,
         autocommit=False,
         autoflush=False,
         expire_on_commit=False,
     )
     logger.info("Session factory ready")
-    return SessionLocal
+    return _session_factory
+
+
+@asynccontextmanager
+async def async_session_scope() -> AsyncIterator[AsyncSession]:
+    """Manage one async database session and transaction boundary."""
+    session_factory = await get_session_factory()
+    async with session_factory() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        else:
+            try:
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            run_after_commit_callbacks(session)
+
+
+async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
+    """Yield a request-scoped AsyncSession for FastAPI dependencies."""
+    async with async_session_scope() as session:
+        yield session
 
 
 async def init_db() -> None:
@@ -93,7 +126,10 @@ async def ping_db() -> bool:
 
 async def close_db() -> None:
     """Dispose the shared engine during shutdown."""
+    global _engine, _session_factory
 
     if _engine is not None:
         await _engine.dispose()
         logger.info("Database engine disposed.")
+        _engine = None
+        _session_factory = None

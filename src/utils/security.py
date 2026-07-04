@@ -34,7 +34,6 @@ def create_access_token(
     claims = {
         "sub": str(recruiter_id),
         "email": email,
-        "role": "recruiter",
         "iat": int(now.timestamp()),
         "exp": int(expires_at.timestamp()),
     }

@@ -1,10 +1,7 @@
 """Database operations for durable event logs."""
 
-import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime
 
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.models.postgres.event_log import EventLog
@@ -15,9 +12,11 @@ class EventLogsRepository:
     """Persist immutable events and support retention-driven soft deletion."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def create(self, event: EventLogCreate) -> EventLog:
+        """Create and flush one durable event log record."""
         record = EventLog(
             event_name=event.event_name.value,
             source_service=event.source_service.value,
@@ -36,6 +35,7 @@ class EventLogsRepository:
         self,
         events: Sequence[EventLogCreate],
     ) -> list[EventLog]:
+        """Create and flush multiple durable event log records."""
         records = [
             EventLog(
                 event_name=event.event_name.value,
@@ -53,12 +53,3 @@ class EventLogsRepository:
             self._session.add_all(records)
             await self._session.flush()
         return records
-
-    async def soft_delete(self, event_id: uuid.UUID) -> bool:
-        result = await self._session.execute(
-            update(EventLog)
-            .where(EventLog.id == event_id)
-            .where(EventLog.deleted_at.is_(None))
-            .values(deleted_at=datetime.now(UTC))
-        )
-        return bool(result.rowcount)

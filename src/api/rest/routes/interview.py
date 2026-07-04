@@ -1,17 +1,19 @@
 """Interview REST routes — candidate token validation and waiting room details."""
 
-import logging
 import uuid
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
+from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import NotFoundException
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
+)
 from src.schemas.candidate import TokenValidationResponse
 from src.schemas.common import APIResponse
 
 router = APIRouter(prefix="/interview", tags=["interview"])
-logger = logging.getLogger(__name__)
 
 
 @router.get(
@@ -22,10 +24,10 @@ logger = logging.getLogger(__name__)
 )
 async def validate_token(
     token: uuid.UUID,
-    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
+    db: AsyncSession = Depends(get_db_session),
 ) -> APIResponse[TokenValidationResponse]:
     """Validate candidate's token and return details for the waiting room."""
-    ca = await unit_of_work.candidate_assessments.get_invitation_context(token)
+    ca = await CandidateAssessmentRepository(db).get_invitation_context(token)
 
     if ca is None:
         raise NotFoundException("Candidate invitation token not found.")

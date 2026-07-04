@@ -28,6 +28,7 @@ class CandidateSessionRepository:
     """Access invitation and reconnect state through one injected session."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def lock_invitation_context(

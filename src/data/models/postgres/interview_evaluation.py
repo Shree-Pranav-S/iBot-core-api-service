@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 
 class InterviewEvaluation(Base):
+    """SQLAlchemy model for persisted interview evaluation reports."""
+
     __tablename__ = "interview_evaluations"
 
     id: Mapped[uuid.UUID] = mapped_column(

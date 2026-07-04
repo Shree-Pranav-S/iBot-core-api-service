@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 
 class NotificationLog(Base):
+    """SQLAlchemy model for notification delivery records."""
+
     __tablename__ = "notification_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(

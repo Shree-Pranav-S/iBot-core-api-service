@@ -23,6 +23,7 @@ from src.observability.logging import configure_logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initialize and dispose process-wide database and Redis resources."""
     await init_db()
     await init_redis()
     try:
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """Create and configure the core API FastAPI application."""
     configure_logging()
     app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
     register_exception_handlers(app)

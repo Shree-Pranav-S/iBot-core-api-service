@@ -14,8 +14,12 @@ from src.core.exceptions import (
     NotFoundException,
 )
 from src.core.services.realtime_event_service import publish_recruiter_event
+from src.data.clients.postgres_client import async_session_scope
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
+)
 from src.schemas.assessment import FocusAreaOverride
 from src.schemas.realtime import RecruiterEventType
 from src.utils.assessment_utils import (
@@ -52,6 +56,7 @@ class AssessmentService:
     """Service layer managing the assessment creation lifecycle and JD parsing/analysis."""
 
     def __init__(self, repository: AssessmentRepository) -> None:
+        """Initialize the assessment service with its repository."""
         self._repository = repository
         self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
@@ -144,8 +149,8 @@ class AssessmentService:
         )
         return assessment
 
+    @staticmethod
     async def process_assessment_in_background(
-        self,
         assessment_id: uuid.UUID,
         jd_text: str | None = None,
         jd_file_bytes: bytes | None = None,
@@ -153,14 +158,23 @@ class AssessmentService:
         focus_areas: list[FocusAreaOverride] | None = None,
     ) -> None:
         """Background task to parse PDF, run LLM analysis, generate plan, and activate assessment."""
-        assessment: Assessment | None = None
+        assessment_info: tuple[uuid.UUID, str, str, int] | None = None
         try:
-            assessment = await self._repository.get_by_id(assessment_id)
-            if not assessment:
-                logger.error(
-                    "Assessment %s not found in background task.", assessment_id
+            async with async_session_scope() as session:
+                assessment = await AssessmentRepository(session).get_by_id(
+                    assessment_id
                 )
-                return
+                if not assessment:
+                    logger.error(
+                        "Assessment %s not found in background task.", assessment_id
+                    )
+                    return
+                assessment_info = (
+                    assessment.recruiter_id,
+                    assessment.title,
+                    assessment.role_name,
+                    assessment.interview_duration_mins,
+                )
 
             parsed_jd_text = ""
             if jd_file_bytes and jd_filename:
@@ -172,27 +186,30 @@ class AssessmentService:
                 raise ValueError("Job description content is empty.")
 
             # Run one LLM call that generates both JD analysis and the executable plan.
+            assert assessment_info is not None
+            recruiter_id, title, role_name, duration_mins = assessment_info
             generated = await run_jd_analysis_and_interview_plan(
                 parsed_jd_text,
-                assessment.interview_duration_mins,
+                duration_mins,
                 focus_areas,
-                self._groq_client,
+                AsyncGroq(api_key=settings.GROQ_API_KEY),
             )
             jd_analysis = generated.jd_analysis
             interview_plan = generated.interview_plan
-            await self._repository.activate_assessment(
-                assessment_id,
-                parsed_jd_text,
-                jd_analysis.model_dump(),
-                interview_plan.model_dump(),
-            )
+            async with async_session_scope() as session:
+                await AssessmentRepository(session).activate_assessment(
+                    assessment_id,
+                    parsed_jd_text,
+                    jd_analysis.model_dump(),
+                    interview_plan.model_dump(),
+                )
             await publish_recruiter_event(
-                recruiter_id=assessment.recruiter_id,
+                recruiter_id=recruiter_id,
                 event_type=RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED,
                 payload={
-                    "assessment_id": str(assessment.id),
-                    "title": assessment.title,
-                    "role_name": assessment.role_name,
+                    "assessment_id": str(assessment_id),
+                    "title": title,
+                    "role_name": role_name,
                     "status": "ACTIVE",
                 },
             )
@@ -204,15 +221,26 @@ class AssessmentService:
                 "Failed to process assessment %s in background.", assessment_id
             )
             try:
-                await self._repository.close_assessment_on_failure(assessment_id)
-                if assessment is not None:
+                failure_info: tuple[uuid.UUID, str, str] | None = None
+                async with async_session_scope() as session:
+                    repository = AssessmentRepository(session)
+                    assessment = await repository.get_by_id(assessment_id)
+                    if assessment is not None:
+                        failure_info = (
+                            assessment.recruiter_id,
+                            assessment.title,
+                            assessment.role_name,
+                        )
+                        await repository.close_assessment_on_failure(assessment_id)
+                if failure_info is not None:
+                    recruiter_id, title, role_name = failure_info
                     await publish_recruiter_event(
-                        recruiter_id=assessment.recruiter_id,
+                        recruiter_id=recruiter_id,
                         event_type=(RecruiterEventType.ASSESSMENT_PROCESSING_FAILED),
                         payload={
-                            "assessment_id": str(assessment.id),
-                            "title": assessment.title,
-                            "role_name": assessment.role_name,
+                            "assessment_id": str(assessment_id),
+                            "title": title,
+                            "role_name": role_name,
                             "status": "CLOSED",
                         },
                     )
@@ -227,14 +255,10 @@ class AssessmentService:
     ) -> None:
         """Fetch all candidates for an assessment and dispatch cancellation emails."""
         try:
-            from src.data.repositories.unit_of_work import UnitOfWork
-
-            async with UnitOfWork() as unit_of_work:
-                records = (
-                    await unit_of_work.candidate_assessments.get_all_by_assessment(
-                        assessment_id
-                    )
-                )
+            async with async_session_scope() as session:
+                records = await CandidateAssessmentRepository(
+                    session
+                ).get_all_by_assessment(assessment_id)
                 candidates_info = [
                     {
                         "candidate_name": record.candidate.full_name,

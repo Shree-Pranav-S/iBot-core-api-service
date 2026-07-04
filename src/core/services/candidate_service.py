@@ -14,6 +14,7 @@ from src.core.exceptions import (
     NotFoundException,
 )
 from src.core.services.realtime_event_service import publish_recruiter_event
+from src.data.clients.postgres_client import async_session_scope
 from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
@@ -23,6 +24,9 @@ from src.data.repositories.candidate_assessment_repository import (
 )
 from src.data.repositories.candidate_repository import CandidateRepository
 from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.notification_log_repository import (
+    NotificationLogRepository,
+)
 from src.handlers.celery_tasks.notification_tasks import enqueue_invitation_email
 from src.schemas.candidate import BulkUploadResponse, CSVRowResult
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
@@ -66,6 +70,7 @@ class CandidateService:
         assessment_repo: AssessmentRepository,
         event_logs_repo: EventLogsRepository,
     ) -> None:
+        """Initialize the candidate service with its repositories."""
         self._candidate_repo = candidate_repo
         self._ca_repo = ca_repo
         self._assessment_repo = assessment_repo
@@ -722,8 +727,7 @@ class CandidateService:
     async def process_candidate_resume_in_background(
         self, ca_record_id, resume_url=None, temp_file_path=None
     ):
-        from src.data.repositories.unit_of_work import UnitOfWork
-
+        """Parse a candidate resume asynchronously and publish the result state."""
         try:
             if resume_url:
                 temp_file_path = str(temporary_resume_path(ca_record_id))
@@ -738,15 +742,10 @@ class CandidateService:
 
             resume_parsed = await parse_resume_from_file(temp_file_path)
 
-            async with UnitOfWork() as unit_of_work:
-                await unit_of_work.candidate_assessments.save_parsed_resume_success(
-                    ca_record_id, resume_parsed
-                )
-                realtime_context = (
-                    await unit_of_work.candidate_assessments.get_realtime_context(
-                        ca_record_id
-                    )
-                )
+            async with async_session_scope() as session:
+                repository = CandidateAssessmentRepository(session)
+                await repository.save_parsed_resume_success(ca_record_id, resume_parsed)
+                realtime_context = await repository.get_realtime_context(ca_record_id)
             if realtime_context:
                 await publish_recruiter_event(
                     recruiter_id=realtime_context["recruiter_id"],
@@ -760,14 +759,11 @@ class CandidateService:
         except Exception as exc:
             logger.exception("Failed to parse resume for ca_record %s", ca_record_id)
             try:
-                async with UnitOfWork() as unit_of_work:
-                    await unit_of_work.candidate_assessments.save_parsed_resume_failed(
-                        ca_record_id, str(exc)
-                    )
-                    realtime_context = (
-                        await unit_of_work.candidate_assessments.get_realtime_context(
-                            ca_record_id
-                        )
+                async with async_session_scope() as session:
+                    repository = CandidateAssessmentRepository(session)
+                    await repository.save_parsed_resume_failed(ca_record_id, str(exc))
+                    realtime_context = await repository.get_realtime_context(
+                        ca_record_id
                     )
                 if realtime_context:
                     await publish_recruiter_event(
@@ -807,6 +803,7 @@ class CandidateService:
         decision,
         feedback=None,
     ):
+        """Send a hiring decision email and persist delivery status."""
         notification_type = "APPROVAL" if decision == "APPROVED" else "REJECTION"
         try:
             await send_hiring_decision_email(
@@ -817,10 +814,9 @@ class CandidateService:
                 decision=decision,
                 feedback=feedback,
             )
-            from src.data.repositories.unit_of_work import UnitOfWork
 
-            async with UnitOfWork() as unit_of_work:
-                await unit_of_work.notifications.log_decision_sent(
+            async with async_session_scope() as session:
+                await NotificationLogRepository(session).log_decision_sent(
                     ca_record_id, recipient_email, notification_type
                 )
         except Exception as exc:
@@ -829,10 +825,8 @@ class CandidateService:
                 ca_record_id,
             )
             try:
-                from src.data.repositories.unit_of_work import UnitOfWork
-
-                async with UnitOfWork() as unit_of_work:
-                    await unit_of_work.notifications.log_decision_failed(
+                async with async_session_scope() as session:
+                    await NotificationLogRepository(session).log_decision_failed(
                         ca_record_id,
                         recipient_email,
                         notification_type,

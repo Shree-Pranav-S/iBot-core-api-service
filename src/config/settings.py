@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Environment-driven configuration for the core API service."""
+
     model_config = SettingsConfigDict(
         env_file=(".env",),
         env_file_encoding="utf-8",
@@ -62,6 +64,7 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
+        """Build the async SQLAlchemy database URL from Postgres settings."""
         return (
             f"postgresql+asyncpg://{quote_plus(self.POSTGRES_USER)}"
             f":{quote_plus(self.POSTGRES_PASSWORD)}"
@@ -70,20 +73,24 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
+        """Build the Redis URL from host, port, database, and password settings."""
         password = f":{quote_plus(self.REDIS_PASSWORD)}@" if self.REDIS_PASSWORD else ""
         return f"redis://{password}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     @property
     def celery_broker_url(self) -> str:
+        """Return the Celery broker URL, defaulting to Redis."""
         return self.CELERY_BROKER_URL or self.REDIS_URL
 
     @property
     def celery_result_backend(self) -> str:
+        """Return the Celery result backend URL, defaulting to Redis."""
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    """Return the cached application settings instance."""
     return Settings()
 
 

@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 
 class Candidate(Base, TimestampMixin):
+    """SQLAlchemy model for candidate profiles."""
+
     __tablename__ = "candidates"
 
     id: Mapped[uuid.UUID] = mapped_column(

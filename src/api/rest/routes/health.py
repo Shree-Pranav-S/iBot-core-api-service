@@ -12,6 +12,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
+    """Return service liveness and backing-store health."""
     database_ok = await ping_db()
     redis_ok = await ping_redis()
     return HealthResponse(

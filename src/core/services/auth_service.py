@@ -42,6 +42,7 @@ class AuthService:
     """Service layer for recruiter registration and login use cases."""
 
     def __init__(self, repository: AuthRepository, redis: Redis | None = None) -> None:
+        """Initialize the auth service with repository and optional Redis client."""
         self._repository = repository
         self._redis = redis
 

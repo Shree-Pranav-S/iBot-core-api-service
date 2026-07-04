@@ -25,6 +25,7 @@ class RecruiterRegisterRequest(AppBaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        """Validate registration password complexity."""
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter.")
         if not any(c.isdigit() for c in v):
@@ -60,6 +61,7 @@ class ForgotPasswordRequest(AppBaseModel):
     @field_validator("new_password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        """Validate reset password complexity."""
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter.")
         if not any(c.isdigit() for c in v):
@@ -83,6 +85,7 @@ class ResendOTPRequest(AppBaseModel):
     @field_validator("new_password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        """Validate replacement password complexity for OTP resend."""
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter.")
         if not any(c.isdigit() for c in v):
@@ -111,12 +114,3 @@ class TokenResponse(AppBaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # seconds
-
-
-class TokenPayload(AppBaseModel):
-    """Decoded JWT payload — used internally by auth dependencies."""
-
-    sub: uuid.UUID  # recruiter id
-    email: str
-    role: str = "recruiter"
-    exp: int  # expiry unix timestamp

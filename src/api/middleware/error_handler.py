@@ -33,6 +33,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: AppException,
     ) -> JSONResponse:
+        """Render application exceptions with the standard error envelope."""
         logger.warning(
             "Application exception",
             extra={
@@ -57,6 +58,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: StarletteHTTPException,
     ) -> JSONResponse:
+        """Render Starlette HTTP exceptions with the standard error envelope."""
         logger.warning(
             "HTTP exception occurred",
             extra={
@@ -75,6 +77,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
+        """Render request validation errors with normalized field details."""
         logger.warning(
             "Request validation failed",
             extra={"path": request.url.path, "method": request.method},
@@ -97,6 +100,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: IntegrityError,
     ) -> JSONResponse:
+        """Render database integrity conflicts without exposing internals."""
         logger.exception(
             "Database integrity error",
             extra={"path": request.url.path, "method": request.method},
@@ -111,6 +115,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: SQLAlchemyError,
     ) -> JSONResponse:
+        """Render SQLAlchemy failures as database errors."""
         logger.exception(
             "Database error",
             extra={"path": request.url.path, "method": request.method},
@@ -125,6 +130,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: Exception,
     ) -> JSONResponse:
+        """Render unexpected exceptions without leaking implementation details."""
         logger.exception(
             "Unhandled exception",
             extra={"path": request.url.path, "method": request.method},

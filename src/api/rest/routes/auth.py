@@ -4,8 +4,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, Header, Request, status
 from redis.asyncio import Redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import UnitOfWork, get_unit_of_work
+from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import (
     AuthenticationException,
     BadRequestException,
@@ -13,6 +14,7 @@ from src.core.exceptions import (
 )
 from src.core.services.auth_service import AuthService
 from src.data.clients.redis_client import get_async_redis
+from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -30,12 +32,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def get_auth_service(
-    unit_of_work: UnitOfWork = Depends(get_unit_of_work),
+    db: AsyncSession = Depends(get_db_session),
     redis: Redis = Depends(get_async_redis),
 ) -> AuthService:
     """Build the auth service from request-scoped dependencies."""
 
-    return AuthService(unit_of_work.auth, redis=redis)
+    return AuthService(AuthRepository(db), redis=redis)
 
 
 @router.post(

@@ -17,6 +17,7 @@ class AuthRepository:
     """Data access layer for recruiter registration, login, and token management."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def get_recruiter_by_email(self, email: str) -> Recruiter | None:

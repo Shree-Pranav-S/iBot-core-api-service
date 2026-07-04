@@ -1,16 +1,17 @@
 """Typed contracts for durable cross-service event logging."""
 
 import uuid
-from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
 from pydantic import Field
 
-from src.schemas.base import AppBaseModel, ORMBaseModel
+from src.schemas.base import AppBaseModel
 
 
 class EventName(StrEnum):
+    """Canonical event names persisted in the event log."""
+
     INVITE_LINK_CONSUMED = "INVITE_LINK_CONSUMED"
     SESSION_TOKEN_REISSUED = "SESSION_TOKEN_REISSUED"
     INVITE_LINK_REJECTED = "INVITE_LINK_REJECTED"
@@ -32,11 +33,15 @@ class EventName(StrEnum):
 
 
 class EventSource(StrEnum):
+    """Service identifiers allowed to emit event logs."""
+
     CORE_API = "CORE_API"
     INTERVIEW_ENGINE = "INTERVIEW_ENGINE"
 
 
 class EventLogCreate(AppBaseModel):
+    """Payload used to create a durable event log record."""
+
     event_name: EventName
     source_service: EventSource
     correlation_id: str = Field(min_length=1, max_length=255)
@@ -45,18 +50,3 @@ class EventLogCreate(AppBaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
-
-
-class EventLogResponse(ORMBaseModel):
-    id: uuid.UUID
-    event_name: EventName
-    source_service: EventSource
-    correlation_id: str
-    candidate_assessment_id: uuid.UUID | None
-    recruiter_id: uuid.UUID | None
-    metadata: dict[str, Any] = Field(alias="metadata_json")
-    error_message: str | None
-    duration_ms: int | None
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: datetime | None

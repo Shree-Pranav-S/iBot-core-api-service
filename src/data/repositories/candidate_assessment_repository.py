@@ -18,6 +18,7 @@ class CandidateAssessmentRepository:
     """Full CRUD access layer for candidate_assessment records."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def get_by_invitation_token(
@@ -169,12 +170,14 @@ class CandidateAssessmentRepository:
             )
 
     async def save_parsed_resume_success(self, ca_record_id, parsed_data):
+        """Persist successful resume parsing output for an enrollment."""
         await self.update_resume_parsing_result(
             ca_record_id, status="COMPLETED", parsed_data=parsed_data
         )
         await self._session.flush()
 
     async def save_parsed_resume_failed(self, ca_record_id, error_msg):
+        """Persist failed resume parsing output for an enrollment."""
         await self.update_resume_parsing_result(
             ca_record_id,
             status="FAILED",

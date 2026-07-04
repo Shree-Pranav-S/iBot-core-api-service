@@ -112,6 +112,7 @@ async def write_temporary_resume(
     path = temporary_resume_path(candidate_assessment_id)
 
     def write_file() -> None:
+        """Write uploaded resume bytes to the temporary path."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
@@ -123,6 +124,7 @@ async def parse_resume_from_file(temp_file_path: str) -> dict:
     """Core logic to extract text from PDF and call Groq to return parsed JSON dict."""
 
     def extract_text() -> str:
+        """Extract text from the temporary resume PDF file."""
         text = ""
         with fitz.open(temp_file_path) as doc:
             for page in doc:
@@ -184,6 +186,7 @@ async def download_resume(resume_url: str, temp_file_path: str) -> None:
     """Download a resume from a URL to a local temporary file path."""
 
     def get_direct_download_url(url: str) -> str:
+        """Convert Google Drive sharing URLs into direct download URLs."""
         gd_match = re.search(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)", url)
         if gd_match:
             file_id = gd_match.group(1)
@@ -204,6 +207,7 @@ async def download_resume(resume_url: str, temp_file_path: str) -> None:
         path = Path(temp_file_path)
 
         def write_file() -> None:
+            """Write downloaded resume bytes to the temporary path."""
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(response.content)
 

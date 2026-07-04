@@ -18,6 +18,7 @@ class NotificationLogRepository:
     """Data access layer for recording dispatched notifications."""
 
     def __init__(self, session: AsyncSession) -> None:
+        """Initialize the repository with the active database session."""
         self._session = session
 
     async def list_report_ready_for_recruiter(
@@ -84,6 +85,7 @@ class NotificationLogRepository:
         return log
 
     async def log_invitation_sent(self, ca_record_id, recipient_email):
+        """Record a successfully sent invitation notification."""
         await self.create(
             candidate_assessment_id=ca_record_id,
             notification_type="INVITATION",
@@ -93,6 +95,7 @@ class NotificationLogRepository:
         await self._session.flush()
 
     async def log_invitation_failed(self, ca_record_id, recipient_email, error_message):
+        """Record a failed invitation notification attempt."""
         await self.create(
             candidate_assessment_id=ca_record_id,
             notification_type="INVITATION",
@@ -108,6 +111,7 @@ class NotificationLogRepository:
         recipient_email,
         notification_type: str,
     ):
+        """Record a successfully sent hiring decision notification."""
         await self.create(
             candidate_assessment_id=ca_record_id,
             notification_type=notification_type,
@@ -123,6 +127,7 @@ class NotificationLogRepository:
         notification_type: str,
         error_message,
     ):
+        """Record a failed hiring decision notification attempt."""
         await self.create(
             candidate_assessment_id=ca_record_id,
             notification_type=notification_type,

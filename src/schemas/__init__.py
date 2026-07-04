@@ -20,15 +20,12 @@ from src.schemas.auth import (
     LoginRequest,
     RecruiterRegisterRequest,
     RecruiterResponse,
-    TokenPayload,
     TokenResponse,
 )
 from src.schemas.candidate import (
     AIRejectionFeedbackResponse,
     BulkUploadResponse,
     CandidateAssessmentListItem,
-    CandidateAssessmentResponse,
-    CandidateResponse,
     CandidateTokenValidationResponse,
     CSVRowResult,
     RecruiterDecisionRequest,
@@ -40,20 +37,14 @@ from src.schemas.common import (
     ErrorDetail,
     ErrorResponse,
     HealthResponse,
-    PaginatedResponse,
 )
 from src.schemas.event_log import (
     EventLogCreate,
-    EventLogResponse,
     EventName,
     EventSource,
 )
 from src.schemas.notification import (
-    NotificationLogResponse,
     RecruiterDashboardNotification,
-    SendInvitationPayload,
-    SendOutcomePayload,
-    SendReminderPayload,
 )
 
 __all__ = [
@@ -62,7 +53,6 @@ __all__ = [
     "LoginRequest",
     "RecruiterResponse",
     "TokenResponse",
-    "TokenPayload",
     # assessment
     "AssessmentCreateRequest",
     "AssessmentUpdateStatusRequest",
@@ -76,29 +66,21 @@ __all__ = [
     "FocusAreaOverride",
     # candidate
     "AIRejectionFeedbackResponse",
-    "CandidateResponse",
     "BulkUploadResponse",
     "CSVRowResult",
     "CandidateAssessmentListItem",
-    "CandidateAssessmentResponse",
     "RecruiterDecisionRequest",
     "RecruiterDecisionResponse",
     "TokenValidationResponse",
     "CandidateTokenValidationResponse",
     # notification
-    "NotificationLogResponse",
     "RecruiterDashboardNotification",
-    "SendInvitationPayload",
-    "SendReminderPayload",
-    "SendOutcomePayload",
     # event logs
     "EventLogCreate",
-    "EventLogResponse",
     "EventName",
     "EventSource",
     # common
     "APIResponse",
-    "PaginatedResponse",
     "ErrorDetail",
     "ErrorResponse",
     "HealthResponse",
