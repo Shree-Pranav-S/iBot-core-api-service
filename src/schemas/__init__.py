@@ -26,7 +26,6 @@ from src.schemas.candidate import (
     AIRejectionFeedbackResponse,
     BulkUploadResponse,
     CandidateAssessmentListItem,
-    CandidateTokenValidationResponse,
     CSVRowResult,
     RecruiterDecisionRequest,
     RecruiterDecisionResponse,
@@ -72,7 +71,6 @@ __all__ = [
     "RecruiterDecisionRequest",
     "RecruiterDecisionResponse",
     "TokenValidationResponse",
-    "CandidateTokenValidationResponse",
     # notification
     "RecruiterDashboardNotification",
     # event logs

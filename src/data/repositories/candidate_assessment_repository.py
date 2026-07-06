@@ -21,16 +21,6 @@ class CandidateAssessmentRepository:
         """Initialize the repository with the active database session."""
         self._session = session
 
-    async def get_by_invitation_token(
-        self, token: uuid.UUID
-    ) -> CandidateAssessment | None:
-        """Return a CandidateAssessment row matching the invitation token."""
-        statement = select(CandidateAssessment).where(
-            CandidateAssessment.invitation_token == token
-        )
-        result = await self._session.execute(statement)
-        return result.scalar_one_or_none()
-
     async def get_invitation_context(
         self, token: uuid.UUID
     ) -> CandidateAssessment | None:
