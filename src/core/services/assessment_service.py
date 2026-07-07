@@ -23,6 +23,7 @@ from src.data.repositories.candidate_assessment_repository import (
 from src.schemas.assessment import FocusAreaOverride
 from src.schemas.realtime import RecruiterEventType
 from src.utils.assessment_utils import (
+    format_jd_to_markdown,
     parse_pdf_jd,
     run_jd_analysis_and_interview_plan,
 )
@@ -188,18 +189,24 @@ class AssessmentService:
             # Run one LLM call that generates both JD analysis and the executable plan.
             assert assessment_info is not None
             recruiter_id, title, role_name, duration_mins = assessment_info
+            groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
             generated = await run_jd_analysis_and_interview_plan(
                 parsed_jd_text,
                 duration_mins,
                 focus_areas,
-                AsyncGroq(api_key=settings.GROQ_API_KEY),
+                groq_client,
             )
             jd_analysis = generated.jd_analysis
             interview_plan = generated.interview_plan
+            # Best-effort: store a neatly formatted Markdown JD for display.
+            formatted_jd_text = await format_jd_to_markdown(
+                parsed_jd_text,
+                groq_client,
+            )
             async with async_session_scope() as session:
                 await AssessmentRepository(session).activate_assessment(
                     assessment_id,
-                    parsed_jd_text,
+                    formatted_jd_text,
                     jd_analysis.model_dump(),
                     interview_plan.model_dump(),
                 )

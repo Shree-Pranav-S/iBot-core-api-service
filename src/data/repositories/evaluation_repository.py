@@ -111,6 +111,37 @@ class EvaluationRepository:
         row = result.mappings().first()
         return dict(row) if row else None
 
+    async def load_report_email_context(
+        self,
+        candidate_assessment_id: str | uuid.UUID,
+    ) -> dict[str, Any] | None:
+        """Load the recruiter/candidate context needed for a report-ready email."""
+        statement = (
+            select(
+                Candidate.full_name.label("candidate_name"),
+                Assessment.title.label("assessment_title"),
+                Assessment.role_name.label("role_name"),
+                func.coalesce(Recruiter.full_name, "").label("recruiter_name"),
+                func.coalesce(Recruiter.email, "").label("recruiter_email"),
+                InterviewEvaluation.overall_score.label("overall_score"),
+                InterviewEvaluation.hiring_recommendation.label(
+                    "hiring_recommendation"
+                ),
+            )
+            .select_from(CandidateAssessment)
+            .join(Candidate, Candidate.id == CandidateAssessment.candidate_id)
+            .join(Assessment, Assessment.id == CandidateAssessment.assessment_id)
+            .outerjoin(Recruiter, Recruiter.id == Assessment.recruiter_id)
+            .outerjoin(
+                InterviewEvaluation,
+                InterviewEvaluation.candidate_assessment_id == CandidateAssessment.id,
+            )
+            .where(CandidateAssessment.id == _uuid(candidate_assessment_id))
+        )
+        result = await self._session.execute(statement)
+        row = result.mappings().first()
+        return dict(row) if row else None
+
     async def evaluation_exists_for_hash(
         self,
         candidate_assessment_id: str | uuid.UUID,

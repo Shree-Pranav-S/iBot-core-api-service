@@ -7,6 +7,7 @@ import re
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
+from pydantic import ValidationError
 
 from src.config.settings import settings
 from src.core.exceptions import (
@@ -14,13 +15,8 @@ from src.core.exceptions import (
     InternalServerException,
 )
 from src.schemas.assessment import (
-    BehaviouralCulturalSection,
     FocusAreaOverride,
-    InterviewPlan,
-    JDAnalysis,
     JDAnalysisAndInterviewPlan,
-    SelfIntroSection,
-    TechnicalInterviewSection,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,246 +43,69 @@ async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
         ) from exc
 
 
-BEHAVIOURAL_CULTURAL_SECTION_KEYS = {
-    "behavioural",
-    "behavioral",
-    "cultural",
-    "culture",
-    "behavioural_cultural",
-    "behavioral_cultural",
-}
+_JD_FORMAT_SYSTEM_PROMPT = (
+    "You are a formatting assistant for a hiring platform. You receive a raw job "
+    "description that may be messy, unformatted, or extracted from a PDF. Rewrite it "
+    "as clean, well-structured GitHub-Flavored Markdown so it is easy for a recruiter "
+    "to read.\n\n"
+    "STRICT RULES:\n"
+    "- Preserve ALL original information, wording, and meaning. Do NOT invent, add, "
+    "remove, or summarize content.\n"
+    "- Only fix structure and formatting: use headings (##), bold for labels, bullet "
+    "lists for responsibilities/requirements/qualifications, and paragraphs where "
+    "appropriate.\n"
+    "- Fix obvious artifacts from PDF extraction such as broken line wraps, stray "
+    "hyphenation, and duplicated whitespace.\n"
+    "- Do NOT wrap the output in a code fence. Do NOT add any commentary, preamble, "
+    "or explanation.\n"
+    "- Return ONLY the formatted Markdown of the job description."
+)
 
 
-def _section_key(name: str) -> str:
-    key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    return key or "section"
+async def format_jd_to_markdown(
+    raw_jd_text: str,
+    groq_client: AsyncGroq,
+) -> str:
+    """Reformat a raw JD into clean Markdown; fall back to the raw text on failure.
 
+    This never raises: formatting is a best-effort enhancement for display, and a
+    failure here must not block assessment processing.
+    """
+    source = (raw_jd_text or "").strip()
+    if not source:
+        return source
 
-def _technical_signal_map(plan: InterviewPlan) -> dict[str, list[str]]:
-    signals: dict[str, list[str]] = {}
-    for section in plan.sections:
-        if not isinstance(section, TechnicalInterviewSection):
-            continue
-        key = _section_key(section.skill)
-        signals[key] = [
-            signal.strip()
-            for signal in section.expected_signals
-            if signal and signal.strip()
-        ][:4]
-    return signals
-
-
-def _unique_signals(signals: list[str]) -> list[str]:
-    """Clean, deduplicate, and preserve order of case-insensitive expected signals."""
-    unique: list[str] = []
-    seen: set[str] = set()
-    for signal in signals:
-        cleaned = str(signal).strip()
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
-            unique.append(cleaned)
-            seen.add(key)
-    return unique
-
-
-def _behavioural_signals(plan: InterviewPlan, jd_analysis: JDAnalysis) -> list[str]:
-    generated: list[str] = []
-    for section in plan.sections:
-        if (
-            isinstance(section, BehaviouralCulturalSection)
-            or _section_key(section.section_name) in BEHAVIOURAL_CULTURAL_SECTION_KEYS
-        ):
-            generated.extend(getattr(section, "expected_signals", []))
-
-    generated.extend(jd_analysis.behavioural_signals)
-    generated.extend(
-        [
-            "Evidence-based collaboration and conflict resolution",
-            "Ownership, adaptability, and clear communication",
-            "Alignment with team culture and working norms",
-        ]
-    )
-
-    selected = _unique_signals(generated)[:4]
-    has_culture_signal = any(
-        marker in signal.casefold()
-        for signal in selected
-        for marker in ("culture", "team fit", "working norm")
-    )
-    if not has_culture_signal:
-        culture_signal = "Alignment with team culture and working norms"
-        if len(selected) >= 4:
-            selected[-1] = culture_signal
-        else:
-            selected.append(culture_signal)
-    return selected
-
-
-def _technical_expected_signals(
-    skill: str,
-    signal_map: dict[str, list[str]],
-) -> list[str]:
-    generated = list(signal_map.get(_section_key(skill)) or [])
-    generated.extend(
-        [
-            f"Understanding of core {skill} concepts",
-            f"Ability to apply {skill} in practical role-relevant scenarios",
-        ]
-    )
-    return _unique_signals(generated)[:4]
-
-
-def _focus_weights(
-    focus_areas: list[FocusAreaOverride] | None,
-) -> dict[str, float]:
-    return {
-        _section_key(item.skill): float(item.weight_override)
-        for item in focus_areas or []
-    }
-
-
-def _allocate_technical_tenths(
-    weights: list[float],
-    total_tenths: int,
-) -> list[int]:
-    """Maximize covered skills, then distribute remaining time by weight."""
-
-    minimum_tenths = 5
-    allocations = [minimum_tenths for _ in weights]
-    remaining = total_tenths - sum(allocations)
-    if remaining <= 0:
-        return allocations
-
-    normalized_weights = [max(0.0, weight) for weight in weights]
-    weight_total = sum(normalized_weights)
-    if weight_total <= 0:
-        normalized_weights = [1.0 for _ in weights]
-        weight_total = float(len(weights))
-
-    exact_shares = [remaining * weight / weight_total for weight in normalized_weights]
-    whole_shares = [int(share) for share in exact_shares]
-    allocations = [
-        allocation + share
-        for allocation, share in zip(allocations, whole_shares, strict=True)
-    ]
-
-    remainder = remaining - sum(whole_shares)
-    ranked_remainders = sorted(
-        range(len(weights)),
-        key=lambda index: (
-            exact_shares[index] - whole_shares[index],
-            normalized_weights[index],
-            -index,
-        ),
-        reverse=True,
-    )
-    for index in ranked_remainders[:remainder]:
-        allocations[index] += 1
-    return allocations
-
-
-def _normalize_interview_plan(
-    plan: InterviewPlan,
-    duration_mins: int,
-    jd_analysis: JDAnalysis,
-    focus_areas: list[FocusAreaOverride] | None,
-) -> InterviewPlan:
-    """Build the final plan deterministically from JD priorities."""
-
-    total_tenths = int(duration_mins * 10)
-
-    # Self-intro: min(10% of total duration, 1 minute)
-    intro_tenths = min(int(total_tenths * 0.10), 10)
-    intro_tenths = max(intro_tenths, 1)  # at least 0.1 min
-
-    behavioural_tenths = int(duration_mins)
-    technical_tenths = total_tenths - intro_tenths - behavioural_tenths
-    if technical_tenths < 5:
-        raise ValueError(
-            "Interview duration leaves less than 30 seconds for technical assessment."
+    try:
+        completion = await groq_client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": _JD_FORMAT_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Reformat the following job description into clean Markdown:\n\n"
+                        f"{source}"
+                    ),
+                },
+            ],
+            temperature=0.1,
         )
-
-    focus_weights = _focus_weights(focus_areas)
-    signal_map = _technical_signal_map(plan)
-
-    unique_skills: list[tuple[int, str, float]] = []
-    seen_skills: set[str] = set()
-    for index, item in enumerate(jd_analysis.skills):
-        key = _section_key(item.skill)
-        if key in seen_skills:
-            continue
-        seen_skills.add(key)
-        effective_weight = focus_weights.get(key, float(item.priority_score))
-        unique_skills.append((index, item.skill, effective_weight))
-
-    if not unique_skills:
-        raise ValueError("JD analysis returned no technical skills.")
-
-    # Cap at maximum 8 technical skills
-    maximum_skill_count = min(8, max(1, technical_tenths // 5))
-    selected_skills = sorted(
-        unique_skills,
-        key=lambda item: (-item[2], item[0]),
-    )[:maximum_skill_count]
-    allocations = _allocate_technical_tenths(
-        [item[2] for item in selected_skills],
-        technical_tenths,
-    )
-
-    # Drop technical skills allocated <= 0.7 minutes (7 tenths) and
-    # redistribute their time among the remaining skills.
-    surviving: list[tuple[tuple[int, str, float], int]] = []
-    freed_tenths = 0
-    for skill_tuple, allocated_tenths in zip(selected_skills, allocations, strict=True):
-        if allocated_tenths <= 7:
-            freed_tenths += allocated_tenths
-        else:
-            surviving.append((skill_tuple, allocated_tenths))
-
-    if freed_tenths > 0 and surviving:
-        # Redistribute freed time proportionally by current allocation
-        total_surviving = sum(a for _, a in surviving)
-        redistributed: list[tuple[tuple[int, str, float], int]] = []
-        remaining_freed = freed_tenths
-        for i, (skill_tuple, alloc) in enumerate(surviving):
-            if i == len(surviving) - 1:
-                # Last skill gets whatever is left to avoid rounding drift
-                extra = remaining_freed
-            else:
-                extra = round(freed_tenths * alloc / total_surviving)
-                remaining_freed -= extra
-            redistributed.append((skill_tuple, alloc + extra))
-        surviving = redistributed
-
-    if not surviving:
-        raise ValueError(
-            "All technical skills were dropped due to insufficient time allocation. "
-            "Consider increasing the interview duration."
+        formatted = (completion.choices[0].message.content or "").strip()
+    except Exception:
+        logger.warning(
+            "JD Markdown formatting failed; falling back to raw text",
+            exc_info=True,
         )
+        return source
 
-    technical_sections: list[TechnicalInterviewSection] = []
-    for (_, skill, _), allocated_tenths in surviving:
-        technical_sections.append(
-            TechnicalInterviewSection(
-                section_name=skill,
-                skill=skill,
-                allocated_mins=round(allocated_tenths / 10.0, 1),
-                expected_signals=_technical_expected_signals(skill, signal_map),
-            )
-        )
+    if not formatted:
+        return source
 
-    return InterviewPlan(
-        total_mins=duration_mins,
-        inferred_difficulty=jd_analysis.inferred_difficulty,
-        sections=[
-            SelfIntroSection(allocated_mins=round(intro_tenths / 10.0, 1)),
-            *technical_sections,
-            BehaviouralCulturalSection(
-                allocated_mins=round(behavioural_tenths / 10.0, 1),
-                expected_signals=_behavioural_signals(plan, jd_analysis),
-            ),
-        ],
-    )
+    formatted = re.sub(r"^```(?:markdown)?\s*\n?", "", formatted)
+    formatted = re.sub(r"\n?```\s*$", "", formatted)
+    formatted = formatted.strip()
+
+    return formatted or source
 
 
 def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
@@ -391,8 +210,8 @@ JD SKILL EXTRACTION AND PRIORITY
   not omit domain-critical competencies (e.g., IFRS, underwriting, clinical
   documentation) in favor of generic soft skills.
 - Keep relevant nice-to-have technical or domain-specific skills in
-  `jd_analysis.skills`; the deterministic planner may omit only those that cannot
-  receive 30 seconds.
+  `jd_analysis.skills` only when they can receive at least 0.5 minute in the
+  interview plan; otherwise omit them from both analysis and plan.
 - Score `priority_score` from 1.0 to 10.0:
   * 9.0-10.0: indispensable core competency repeatedly tied to primary duties.
   * 7.0-8.9: strongly required and regularly used in the role.
@@ -426,6 +245,10 @@ INTERVIEW PLAN — HARD RULES
   must receive at least 0.5 minute. Drop a skill only when available assessment
   time is too low to give it 0.5 minute; drop the lowest effective-weight skill
   first. Never impose an arbitrary skill-count cap.
+- For short interviews (15 minutes or less), include only the highest-priority skills
+  that can each receive at least 0.5 minute after reserving self_intro and
+  behavioural_cultural time. It is valid to assess 2-4 core skills in a 15-minute
+  interview rather than listing every peripheral competency from the JD.
 - A technical or domain section's `section_name` and `skill` must both exactly match the
   corresponding `jd_analysis.skills[].skill`.
 - Technical/domain and behavioural sections need 2-4 concise, observable
@@ -705,6 +528,36 @@ The exact permitted structure is:
 """.strip()
 
 
+def _combined_analysis_messages(
+    *,
+    user_prompt: str,
+    repair_note: str | None = None,
+) -> list[dict[str, str]]:
+    """Build chat messages for JD analysis, optionally including a repair hint."""
+    schema_json = json.dumps(
+        JDAnalysisAndInterviewPlan.model_json_schema(),
+        indent=2,
+        ensure_ascii=True,
+    )
+    system_prompt = (
+        _combined_analysis_system_prompt() + "\n\nJSON OUTPUT RULES\n"
+        "- Respond with one JSON object only. No markdown fences, commentary, or prose.\n"
+        "- The top-level object must contain exactly `jd_analysis` and `interview_plan`.\n"
+        "- `interview_plan.sections` must include `self_intro`, one or more technical/domain "
+        "skill sections, and `behavioural_cultural` in that order.\n"
+        "- Section minutes must sum exactly to `interview_plan.total_mins`.\n"
+        "- Match this JSON Schema:\n"
+        f"{schema_json}"
+    )
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    if repair_note:
+        messages.append({"role": "user", "content": repair_note})
+    return messages
+
+
 async def run_jd_analysis_and_interview_plan(
     jd_text: str,
     duration_mins: int,
@@ -713,49 +566,65 @@ async def run_jd_analysis_and_interview_plan(
 ) -> JDAnalysisAndInterviewPlan:
     """Call Groq once to produce both JD analysis and the executable interview plan."""
 
-    user_prompt = (
+    model = settings.GROQ_MODEL
+    base_user_prompt = (
         f"Interview duration: {duration_mins} minutes\n"
         f"Focus area overrides as JSON: {_focus_areas_for_prompt(focus_areas)}\n\n"
-        "Analyze this Job Description and generate the combined output:\n"
+        "Analyze this Job Description and generate the combined output.\n"
+        "The interview_plan must be complete, time-balanced, and executable for this "
+        f"exact {duration_mins}-minute duration.\n\n"
         f"{jd_text}"
     )
 
     last_exc: Exception | None = None
-    for attempt in range(2):
+    repair_note: str | None = None
+    max_attempts = 3
+    for attempt in range(max_attempts):
         try:
             completion = await groq_client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": _combined_analysis_system_prompt()},
-                    {"role": "user", "content": user_prompt},
-                ],
+                model=model,
+                messages=_combined_analysis_messages(
+                    user_prompt=base_user_prompt,
+                    repair_note=repair_note,
+                ),
                 response_format={"type": "json_object"},
                 temperature=0.1,
             )
             raw_content = completion.choices[0].message.content or ""
             parsed_json = json.loads(raw_content)
             combined = JDAnalysisAndInterviewPlan.model_validate(parsed_json)
-            normalized_plan = _normalize_interview_plan(
-                combined.interview_plan,
-                duration_mins,
-                combined.jd_analysis,
-                focus_areas,
+            combined.interview_plan.total_mins = duration_mins
+            combined.interview_plan.inferred_difficulty = (
+                combined.jd_analysis.inferred_difficulty
             )
-            return JDAnalysisAndInterviewPlan(
-                jd_analysis=combined.jd_analysis,
-                interview_plan=normalized_plan,
-            )
+            return combined
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                repair_note = (
+                    "Your previous JSON response failed validation. "
+                    f"Error: {exc}\n"
+                    "Return a corrected JSON object only. Follow the schema exactly."
+                )
+                logger.warning(
+                    "JD analysis attempt %s failed validation; retrying: %s",
+                    attempt + 1,
+                    exc,
+                )
+                await asyncio.sleep(1.5)
+                continue
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt == 0:
+            if attempt < max_attempts - 1:
                 logger.warning(
-                    "Combined JD analysis/interview-plan attempt 1 failed, retrying once: %s",
+                    "JD analysis attempt %s failed; retrying: %s",
+                    attempt + 1,
                     exc,
                 )
                 await asyncio.sleep(1.5)
                 continue
 
-    logger.exception("Groq combined JD analysis/interview-plan failed after retry")
+    logger.exception("Groq combined JD analysis/interview-plan failed after retries")
     raise BadGatewayException(
         f"Failed to analyze job description and generate interview plan: {last_exc}"
     ) from last_exc

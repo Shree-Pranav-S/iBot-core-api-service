@@ -678,3 +678,127 @@ async def send_otp_email(recipient_email: str, otp: str) -> None:
             "brevo_response": str(result),
         },
     )
+
+
+async def send_report_ready_email(
+    *,
+    recruiter_email: str,
+    recruiter_name: str,
+    candidate_name: str,
+    assessment_title: str,
+    role_name: str,
+    overall_score: float | int | None,
+    hiring_recommendation: str | None,
+    report_link: str,
+) -> None:
+    """Notify a recruiter via Brevo that an evaluation report is ready."""
+    safe_recruiter_name = escape((recruiter_name or "there").strip() or "there")
+    safe_candidate_name = escape((candidate_name or "The candidate").strip())
+    safe_assessment_title = escape((assessment_title or "Assessment").strip())
+    safe_role_name = escape((role_name or "the role").strip())
+    safe_report_link = escape(report_link)
+
+    score_display = "—"
+    if overall_score is not None:
+        try:
+            score_display = f"{float(overall_score):.1f}"
+        except (TypeError, ValueError):
+            score_display = escape(str(overall_score))
+
+    recommendation_display = escape(
+        (hiring_recommendation or "Not specified").replace("_", " ").strip().title()
+    )
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <title>Evaluation Report Ready</title>
+    </head>
+    <body style="margin:0;padding:0;background-color:#f4f6fa;font-family:'Segoe UI',Arial,sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 0;">
+        <tr>
+          <td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+              <tr>
+                <td style="background:linear-gradient(135deg,#0f766e 0%,#059669 100%);padding:36px 40px;text-align:center;">
+                  <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;letter-spacing:-0.5px;">iBot AI Interview</h1>
+                  <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Evaluation report ready</p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:40px;">
+                  <p style="margin:0 0 8px;color:#0f766e;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Report Ready</p>
+                  <h2 style="margin:0 0 20px;color:#0f172a;font-size:22px;font-weight:700;">Hello, {safe_recruiter_name}</h2>
+                  <p style="margin:0 0 24px;color:#4b5563;font-size:15px;line-height:1.7;">
+                    The interview evaluation for <strong style="color:#0f172a;">{safe_candidate_name}</strong>
+                    is now ready to review.
+                  </p>
+                  <table width="100%" cellpadding="0" cellspacing="0" style="background:#ecfdf5;border:1px solid #a7f3d0;border-radius:12px;margin:0 0 26px;">
+                    <tr>
+                      <td style="padding:18px 22px;">
+                        <p style="margin:0;color:#64748b;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">Assessment</p>
+                        <p style="margin:6px 0 0;color:#0f172a;font-size:15px;font-weight:700;">{safe_assessment_title}</p>
+                        <p style="margin:6px 0 0;color:#475569;font-size:13px;">Role: {safe_role_name}</p>
+                        <p style="margin:12px 0 0;color:#0f172a;font-size:13px;">
+                          <strong>Overall score:</strong> {score_display} &nbsp;·&nbsp;
+                          <strong>Recommendation:</strong> {recommendation_display}
+                        </p>
+                      </td>
+                    </tr>
+                  </table>
+                  <table cellpadding="0" cellspacing="0" style="margin:0 0 8px;">
+                    <tr>
+                      <td style="border-radius:10px;background:#059669;">
+                        <a href="{safe_report_link}" target="_blank"
+                          style="display:inline-block;padding:14px 30px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;border-radius:10px;">
+                          View evaluation report
+                        </a>
+                      </td>
+                    </tr>
+                  </table>
+                  <p style="margin:18px 0 0;color:#94a3b8;font-size:12px;line-height:1.6;word-break:break-all;">
+                    If the button does not work, copy and paste this link into your browser:<br/>
+                    {safe_report_link}
+                  </p>
+                </td>
+              </tr>
+              <tr>
+                <td style="background:#f8fafc;border-top:1px solid #f1f5f9;padding:22px 40px;text-align:center;">
+                  <p style="margin:0;color:#94a3b8;font-size:12px;">This message was sent by the iBot AI Interview Platform.</p>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
+    """
+
+    client = AsyncBrevo(api_key=settings.BREVO_API_KEY)
+    sender = SendTransacEmailRequestSender(
+        email=settings.BREVO_SENDER_EMAIL,
+        name="iBot AI Interview Platform",
+    )
+    recipient = SendTransacEmailRequestToItem(
+        email=recruiter_email,
+        name=recruiter_name or recruiter_email,
+    )
+    result = await client.transactional_emails.send_transac_email(
+        html_content=html_content,
+        sender=sender,
+        subject=f"Evaluation ready: {candidate_name} — {role_name}",
+        to=[recipient],
+    )
+    logger.info(
+        "Report-ready email sent via Brevo",
+        extra={
+            "recipient": recruiter_email,
+            "assessment_title": assessment_title,
+            "candidate_name": candidate_name,
+            "brevo_response": str(result),
+        },
+    )

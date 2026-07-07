@@ -20,6 +20,7 @@ from src.data.repositories.event_logs_repository import EventLogsRepository
 from src.data.repositories.interview_session_repository import (
     InterviewSessionRepository,
 )
+from src.handlers.celery_tasks.notification_tasks import enqueue_report_ready_email
 from src.schemas.common import APIResponse
 from src.schemas.event_log import EventLogCreate
 from src.schemas.internal_interview import (
@@ -341,6 +342,14 @@ async def save_final_evaluation(
         body.record,
         recruiter_email=body.recruiter_email,
     )
+
+    recruiter_email = (body.recruiter_email or "").strip()
+    if recruiter_email:
+        enqueue_report_ready_email(
+            ca_record_id=uuid.UUID(str(body.record.candidate_assessment_id)),
+            recruiter_email=recruiter_email,
+        )
+
     return APIResponse(
         message="Evaluation saved.",
         data=SaveFinalEvaluationResponse(

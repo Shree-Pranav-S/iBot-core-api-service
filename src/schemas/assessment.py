@@ -177,8 +177,7 @@ class JDAnalysisAndInterviewPlan(AppBaseModel):
         The interview plan must inherit inferred_difficulty from jd_analysis.
 
         This avoids failing the entire LLM response if the model returns a mismatched
-        difficulty in interview_plan. The deterministic normalizer can still rebuild
-        the final plan afterwards.
+        difficulty in interview_plan.
         """
 
         self.interview_plan.inferred_difficulty = self.jd_analysis.inferred_difficulty
