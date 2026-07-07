@@ -9,6 +9,10 @@ from src.api.middleware.logging import request_logging_middleware
 from src.api.rest.routes.assessments import router as assessments_router
 from src.api.rest.routes.auth import router as auth_router
 from src.api.rest.routes.candidates import router as candidates_router
+from src.api.rest.routes.evaluation import (
+    candidate_compat_router as candidate_evaluation_compat_router,
+)
+from src.api.rest.routes.evaluation import router as evaluations_router
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.internal_interview import router as internal_interview_router
 from src.api.rest.routes.interview import router as interview_router
@@ -42,6 +46,8 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(assessments_router)
     app.include_router(candidates_router)
+    app.include_router(evaluations_router)
+    app.include_router(candidate_evaluation_compat_router)
     app.include_router(internal_interview_router)
     app.include_router(interview_router)
     app.include_router(notifications_router)

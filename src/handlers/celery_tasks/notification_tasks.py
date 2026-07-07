@@ -14,7 +14,11 @@ from src.data.clients.postgres_client import async_session_scope
 from src.data.repositories.evaluation_repository import EvaluationRepository
 from src.data.repositories.notification_log_repository import NotificationLogRepository
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
-from src.utils.candidates import send_invitation_email, send_report_ready_email
+from src.utils.candidates import (
+    send_cancellation_email,
+    send_invitation_email,
+    send_report_ready_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +180,165 @@ def enqueue_invitation_email(
             "role_name": role_name,
             "invitation_link": invitation_link,
             "interview_duration_mins": interview_duration_mins,
+        }
+    )
+
+
+async def _send_cancellation(payload: dict[str, Any]) -> None:
+    ca_record_id = uuid.UUID(str(payload["candidate_assessment_id"]))
+    recipient_email = str(payload["recipient_email"])
+
+    await send_cancellation_email(
+        candidate_name=str(payload["candidate_name"]),
+        recipient_email=recipient_email,
+        assessment_title=str(payload["assessment_title"]),
+        role_name=str(payload["role_name"]),
+    )
+    async with async_session_scope() as session:
+        await NotificationLogRepository(session).create(
+            candidate_assessment_id=ca_record_id,
+            notification_type="ASSESSMENT_CANCELLATION",
+            recipient_email=recipient_email,
+            delivery_status="SENT",
+        )
+
+
+async def _log_cancellation_failure(
+    payload: dict[str, Any],
+    error_message: str,
+) -> None:
+    async with async_session_scope() as session:
+        await NotificationLogRepository(session).create(
+            candidate_assessment_id=uuid.UUID(str(payload["candidate_assessment_id"])),
+            notification_type="ASSESSMENT_CANCELLATION",
+            recipient_email=str(payload["recipient_email"]),
+            delivery_status="FAILED",
+            error_message=error_message,
+        )
+
+
+@celery_app.task(  # type: ignore
+    bind=True,
+    max_retries=3,
+    name="core.send_cancellation_email",
+)
+def send_cancellation_email_task(self: Any, payload: dict[str, Any]) -> None:
+    """Send and log one candidate assessment-cancellation email."""
+
+    candidate_assessment_id = str(payload["candidate_assessment_id"])
+    task_id = str(self.request.id or candidate_assessment_id)
+    started_at = time.monotonic()
+    run_async(
+        try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.CELERY_TASK_STARTED,
+                source_service=EventSource.CORE_API,
+                correlation_id=task_id,
+                candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                metadata={
+                    "task_name": self.name,
+                    "retry_number": self.request.retries,
+                },
+            )
+        )
+    )
+    try:
+        run_async(_send_cancellation(payload))
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_COMPLETED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                    },
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            countdown = min(60, 2**self.request.retries)
+            run_async(
+                try_record_event_in_background(
+                    EventLogCreate(
+                        event_name=EventName.CELERY_TASK_RETRYING,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=task_id,
+                        candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                        metadata={
+                            "task_name": self.name,
+                            "retry_number": self.request.retries,
+                            "retry_in_seconds": countdown,
+                            "exception_type": type(exc).__name__,
+                        },
+                        error_message=str(exc),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                )
+            )
+            logger.exception(
+                "Cancellation email task failed; retrying",
+                extra={
+                    "candidate_assessment_id": payload.get("candidate_assessment_id"),
+                    "retry_in": countdown,
+                },
+            )
+            raise self.retry(exc=exc, countdown=countdown)
+
+        error_message = f"{type(exc).__name__}: {exc}"
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_FAILED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    candidate_assessment_id=uuid.UUID(candidate_assessment_id),
+                    metadata={
+                        "task_name": self.name,
+                        "retry_number": self.request.retries,
+                        "exception_type": type(exc).__name__,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
+        logger.exception(
+            "Cancellation email task failed permanently",
+            extra={"candidate_assessment_id": payload.get("candidate_assessment_id")},
+        )
+        try:
+            run_async(_log_cancellation_failure(payload, error_message))
+        except Exception:
+            logger.exception(
+                "Failed to write cancellation failure log",
+                extra={
+                    "candidate_assessment_id": payload.get("candidate_assessment_id")
+                },
+            )
+        raise
+
+
+def enqueue_cancellation_email(
+    *,
+    ca_record_id: uuid.UUID,
+    candidate_name: str,
+    recipient_email: str,
+    assessment_title: str,
+    role_name: str,
+) -> None:
+    """Queue a candidate assessment-cancellation email for asynchronous delivery."""
+    send_cancellation_email_task.delay(
+        {
+            "candidate_assessment_id": str(ca_record_id),
+            "candidate_name": candidate_name,
+            "recipient_email": recipient_email,
+            "assessment_title": assessment_title,
+            "role_name": role_name,
         }
     )
 

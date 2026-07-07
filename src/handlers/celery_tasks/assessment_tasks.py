@@ -16,6 +16,10 @@ from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.clients.celery_client import celery_app, run_async
 from src.data.clients.postgres_client import async_session_scope
 from src.data.repositories.assessment_repository import AssessmentRepository
+from src.data.repositories.candidate_assessment_repository import (
+    CandidateAssessmentRepository,
+)
+from src.handlers.celery_tasks.notification_tasks import enqueue_cancellation_email
 from src.schemas.assessment import FocusAreaOverride
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.schemas.realtime import RecruiterEventType
@@ -259,3 +263,133 @@ def enqueue_assessment_processing(
         jd_filename,
         focus_areas_payload,
     )
+
+
+async def _dispatch_assessment_cancellations(assessment_uuid: uuid.UUID) -> None:
+    try:
+        async with async_session_scope() as session:
+            records = await CandidateAssessmentRepository(
+                session
+            ).get_all_by_assessment(assessment_uuid)
+            candidates_info = [
+                {
+                    "candidate_assessment_id": record.id,
+                    "candidate_name": record.candidate.full_name,
+                    "recipient_email": record.candidate.email,
+                    "assessment_title": record.assessment.title,
+                    "role_name": record.assessment.role_name,
+                }
+                for record in records
+                if record.candidate and record.candidate.email and record.assessment
+            ]
+
+        if not candidates_info:
+            logger.warning(
+                "No candidates found or assessment missing during cancellation dispatch for %s",
+                assessment_uuid,
+            )
+            return
+
+        for info in candidates_info:
+            enqueue_cancellation_email(
+                ca_record_id=info["candidate_assessment_id"],  # type: ignore[arg-type]
+                candidate_name=info["candidate_name"],  # type: ignore[arg-type]
+                recipient_email=info["recipient_email"],  # type: ignore[arg-type]
+                assessment_title=info["assessment_title"],  # type: ignore[arg-type]
+                role_name=info["role_name"],  # type: ignore[arg-type]
+            )
+
+        logger.info(
+            "Successfully dispatched cancellation emails for assessment %s",
+            assessment_uuid,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to dispatch cancellation emails for assessment %s",
+            assessment_uuid,
+        )
+
+
+@celery_app.task(  # type: ignore
+    bind=True,
+    max_retries=3,
+    name="core.dispatch_assessment_cancellations",
+)
+def dispatch_assessment_cancellations_task(self: Any, assessment_id: str) -> None:
+    """Batch fetch all candidates and dispatch individual cancellation emails."""
+    assessment_uuid = uuid.UUID(assessment_id)
+    task_id = str(self.request.id or assessment_id)
+    started_at = time.monotonic()
+    run_async(
+        try_record_event_in_background(
+            EventLogCreate(
+                event_name=EventName.CELERY_TASK_STARTED,
+                source_service=EventSource.CORE_API,
+                correlation_id=task_id,
+                metadata={
+                    "task_name": self.name,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    )
+    try:
+        run_async(_dispatch_assessment_cancellations(assessment_uuid))
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_COMPLETED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    metadata={
+                        "task_name": self.name,
+                        "assessment_id": assessment_id,
+                    },
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
+    except Exception as exc:
+        if self.request.retries < self.max_retries:
+            countdown = min(60, 2**self.request.retries)
+            run_async(
+                try_record_event_in_background(
+                    EventLogCreate(
+                        event_name=EventName.CELERY_TASK_RETRYING,
+                        source_service=EventSource.CORE_API,
+                        correlation_id=task_id,
+                        metadata={
+                            "task_name": self.name,
+                            "assessment_id": assessment_id,
+                            "retry_number": self.request.retries,
+                            "retry_in_seconds": countdown,
+                        },
+                        error_message=str(exc),
+                        duration_ms=int((time.monotonic() - started_at) * 1000),
+                    )
+                )
+            )
+            raise self.retry(exc=exc, countdown=countdown)
+
+        run_async(
+            try_record_event_in_background(
+                EventLogCreate(
+                    event_name=EventName.CELERY_TASK_FAILED,
+                    source_service=EventSource.CORE_API,
+                    correlation_id=task_id,
+                    metadata={
+                        "task_name": self.name,
+                        "assessment_id": assessment_id,
+                        "retry_number": self.request.retries,
+                    },
+                    error_message=str(exc),
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                )
+            )
+        )
+        raise
+
+
+def enqueue_assessment_cancellations(assessment_id: uuid.UUID) -> None:
+    """Queue assessment cancellation dispatch."""
+    dispatch_assessment_cancellations_task.delay(str(assessment_id))

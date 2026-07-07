@@ -1,7 +1,6 @@
 """Candidate REST routes - bulk CSV upload and candidate listing."""
 
 import uuid
-from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -12,42 +11,29 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.rest.dependencies import get_db_session
 from src.core.exceptions import (
     AuthenticationException,
     BadRequestException,
-    ForbiddenException,
-    NotFoundException,
 )
 from src.core.services.candidate_service import CandidateService
-from src.data.models.postgres.interview_session import InterviewSession
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
 from src.data.repositories.candidate_repository import CandidateRepository
-from src.data.repositories.evaluation_repository import EvaluationRepository
 from src.data.repositories.event_logs_repository import EventLogsRepository
 from src.schemas.candidate import (
-    AIRejectionFeedbackResponse,
     BulkUploadResponse,
     CandidateAssessmentListItem,
     ExistingCandidateListItem,
-    InterviewTranscriptResponse,
     RecruiterDecisionRequest,
     RecruiterDecisionResponse,
     SingleCandidateResponse,
-    TranscriptTurn,
 )
 from src.schemas.common import APIResponse
-from src.schemas.evaluation import (
-    InterviewEvaluationResponse,
-    RecruiterEvaluationListItem,
-)
-from src.utils.candidates import generate_rejection_feedback
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
 
@@ -312,123 +298,6 @@ async def list_candidates(
     )
 
 
-@router.get(
-    "/evaluations",
-    response_model=APIResponse[list[RecruiterEvaluationListItem]],
-    summary="List evaluated interviews for recruiter",
-    description="Return all completed interview evaluations for assessments owned by the recruiter.",
-)
-async def list_recruiter_evaluations(
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    db: AsyncSession = Depends(get_db_session),
-) -> APIResponse[list[RecruiterEvaluationListItem]]:
-    """Return recruiter-owned candidate evaluations for the dashboard."""
-    if not x_user_id:
-        raise AuthenticationException("Missing identity header.")
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
-    rows = await EvaluationRepository(db).list_by_recruiter(recruiter_id)
-
-    data: list[RecruiterEvaluationListItem] = []
-    for evaluation, ca, candidate, assessment in rows:
-        validated_violation_count = 0
-        if isinstance(evaluation.violation_summary, dict):
-            validated_violation_count = int(
-                evaluation.violation_summary.get(
-                    "validated_violation_count",
-                    0,
-                )
-                or 0
-            )
-        data.append(
-            RecruiterEvaluationListItem(
-                candidate_assessment_id=ca.id,
-                candidate_name=candidate.full_name,
-                candidate_email=candidate.email,
-                assessment_id=assessment.id,
-                assessment_title=assessment.title,
-                role_name=assessment.role_name,
-                recruiter_decision=ca.recruiter_decision,
-                interview_started_at=ca.interview_started_at,
-                interview_ended_at=ca.interview_ended_at,
-                generated_at=evaluation.generated_at,
-                overall_score=evaluation.overall_score,
-                hiring_recommendation=evaluation.hiring_recommendation,
-                recommendation_reasoning=evaluation.recommendation_reasoning,
-                overall_summary=evaluation.overall_summary,
-                overall_technical_skill_score=(
-                    evaluation.overall_technical_skill_score
-                ),
-                behavioural_cultural_score=(evaluation.behavioural_cultural_score),
-                communication_score=evaluation.communication_score,
-                rank_in_assessment=evaluation.rank_in_assessment,
-                percentile_in_assessment=evaluation.percentile_in_assessment,
-                total_candidates_evaluated=evaluation.total_candidates_evaluated,
-                strengths=evaluation.strengths,
-                concerns=evaluation.concerns,
-                validated_violation_count=validated_violation_count,
-                skill_scores=evaluation.skill_scores,
-            )
-        )
-
-    return APIResponse(
-        message="Evaluations retrieved successfully.",
-        data=data,
-    )
-
-
-@router.post(
-    "/{ca_id}/rejection-feedback",
-    response_model=APIResponse[AIRejectionFeedbackResponse],
-    summary="Generate rejection feedback",
-    description="Draft editable, candidate-facing rejection feedback from evaluation evidence.",
-)
-async def create_rejection_feedback(
-    ca_id: uuid.UUID,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    db: AsyncSession = Depends(get_db_session),
-) -> APIResponse[AIRejectionFeedbackResponse]:
-    """Generate a recruiter-editable rejection feedback draft."""
-    if not x_user_id:
-        raise AuthenticationException("Missing identity header.")
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
-    ca_repo = CandidateAssessmentRepository(db)
-    evaluation_repo = EvaluationRepository(db)
-
-    ca = await ca_repo.get_by_id(ca_id)
-    if ca is None:
-        raise NotFoundException("Candidate registration not found.")
-    if ca.assessment.recruiter_id != recruiter_id:
-        raise ForbiddenException("You do not have access to this evaluation.")
-
-    evaluation = await evaluation_repo.get_by_candidate_assessment_id(ca_id)
-    if evaluation is None:
-        raise NotFoundException("Evaluation not found for this candidate.")
-
-    feedback = await generate_rejection_feedback(
-        candidate_name=ca.candidate.full_name if ca.candidate else "Candidate",
-        role_name=ca.assessment.role_name,
-        assessment_title=ca.assessment.title,
-        overall_summary=evaluation.overall_summary,
-        recommendation_reasoning=evaluation.recommendation_reasoning,
-        strengths=list(evaluation.strengths or []),
-        concerns=list(evaluation.concerns or []),
-    )
-    return APIResponse(
-        message="Rejection feedback draft generated successfully.",
-        data=AIRejectionFeedbackResponse(feedback=feedback),
-    )
-
-
 @router.post(
     "/{ca_id}/decision",
     response_model=APIResponse[RecruiterDecisionResponse],
@@ -463,216 +332,6 @@ async def update_recruiter_decision(
             candidate_assessment_id=ca.id,
             recruiter_decision=ca.recruiter_decision,
             updated_at=ca.updated_at,
-        ),
-    )
-
-
-@router.get(
-    "/{ca_id}/evaluation",
-    response_model=APIResponse[InterviewEvaluationResponse],
-    summary="Get candidate evaluation report",
-    description="Return the full holistic evaluation report for a candidate.",
-)
-async def get_candidate_evaluation(
-    ca_id: uuid.UUID,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    db: AsyncSession = Depends(get_db_session),
-) -> APIResponse[InterviewEvaluationResponse]:
-    """Fetch the evaluation report."""
-    if not x_user_id:
-        raise AuthenticationException("Missing identity header.")
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
-    ca_repo = CandidateAssessmentRepository(db)
-    evaluation_repo = EvaluationRepository(db)
-
-    ca = await ca_repo.get_by_id(ca_id)
-    if ca is None:
-        raise NotFoundException("Candidate registration not found.")
-    if ca.assessment.recruiter_id != recruiter_id:
-        raise ForbiddenException("You do not have access to this evaluation.")
-
-    evaluation = await evaluation_repo.get_by_candidate_assessment_id(ca_id)
-
-    if not evaluation:
-        raise NotFoundException("Evaluation not found for this candidate.")
-
-    response = InterviewEvaluationResponse.model_validate(
-        evaluation,
-        from_attributes=True,
-    )
-    response.candidate_name = ca.candidate.full_name if ca.candidate else None
-    response.candidate_email = ca.candidate.email if ca.candidate else None
-    response.assessment_title = ca.assessment.title if ca.assessment else None
-    response.role_name = ca.assessment.role_name if ca.assessment else None
-    response.recruiter_decision = ca.recruiter_decision
-    response.recruiter_feedback = ca.recruiter_feedback
-
-    return APIResponse(
-        message="Evaluation retrieved successfully.",
-        data=response,
-    )
-
-
-@router.get(
-    "/{ca_id}/transcript",
-    response_model=APIResponse[InterviewTranscriptResponse],
-    summary="Get interview transcript",
-    description="Return the full interview transcript for a candidate assessment, if an interview session exists.",
-)
-async def get_interview_transcript(
-    ca_id: uuid.UUID,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    db: AsyncSession = Depends(get_db_session),
-) -> APIResponse[InterviewTranscriptResponse]:
-    """Fetch the interview transcript for a candidate."""
-    if not x_user_id:
-        raise AuthenticationException("Missing identity header.")
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
-    ca = await CandidateAssessmentRepository(db).get_by_id(ca_id)
-    if ca is None:
-        raise NotFoundException("Candidate registration not found.")
-    if ca.assessment.recruiter_id != recruiter_id:
-        raise ForbiddenException("You do not have access to this transcript.")
-
-    statement = select(InterviewSession).where(
-        InterviewSession.candidate_assessment_id == ca_id
-    )
-    result = await db.execute(statement)
-    session = result.scalar_one_or_none()
-
-    turns: list[TranscriptTurn] = []
-    total_elapsed_secs = 0
-
-    if session and session.transcript:
-        total_elapsed_secs = session.total_elapsed_secs or 0
-        for raw_turn in session.transcript:
-            if isinstance(raw_turn, dict):
-                raw_metadata = raw_turn.get("metadata")
-                metadata: dict[str, Any] = (
-                    dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-                )
-                elapsed_value = metadata.get("elapsed_secs")
-                try:
-                    elapsed_secs = (
-                        max(0, int(elapsed_value))
-                        if elapsed_value is not None
-                        else None
-                    )
-                except (TypeError, ValueError):
-                    elapsed_secs = None
-                turns.append(
-                    TranscriptTurn(
-                        turn_number=int(raw_turn.get("turn_number", len(turns) + 1)),
-                        turn_id=(
-                            str(raw_turn["turn_id"])
-                            if raw_turn.get("turn_id")
-                            else None
-                        ),
-                        speaker=str(raw_turn.get("speaker", "unknown")),
-                        text=str(raw_turn.get("text", "")),
-                        tone=raw_turn.get("tone"),
-                        timestamp=(
-                            str(raw_turn["timestamp"])
-                            if raw_turn.get("timestamp")
-                            else None
-                        ),
-                        elapsed_secs=elapsed_secs,
-                        question_id=(
-                            str(raw_turn["question_id"])
-                            if raw_turn.get("question_id")
-                            else (
-                                str(metadata["question_id"])
-                                if metadata.get("question_id")
-                                else None
-                            )
-                        ),
-                        section=(
-                            str(
-                                raw_turn.get("current_section")
-                                or raw_turn.get("section")
-                                or metadata.get("current_section")
-                                or metadata.get("section")
-                            )
-                            if (
-                                raw_turn.get("current_section")
-                                or raw_turn.get("section")
-                                or metadata.get("current_section")
-                                or metadata.get("section")
-                            )
-                            else None
-                        ),
-                        skill=(
-                            str(
-                                raw_turn.get("current_skill")
-                                or raw_turn.get("skill")
-                                or metadata.get("current_skill")
-                                or metadata.get("skill")
-                            )
-                            if (
-                                raw_turn.get("current_skill")
-                                or raw_turn.get("skill")
-                                or metadata.get("current_skill")
-                                or metadata.get("skill")
-                            )
-                            else None
-                        ),
-                        difficulty=(
-                            str(
-                                raw_turn.get("question_difficulty")
-                                or raw_turn.get("difficulty")
-                                or metadata.get("question_difficulty")
-                                or metadata.get("difficulty")
-                            )
-                            if (
-                                raw_turn.get("question_difficulty")
-                                or raw_turn.get("difficulty")
-                                or metadata.get("question_difficulty")
-                                or metadata.get("difficulty")
-                            )
-                            else None
-                        ),
-                        question_type=(
-                            str(
-                                raw_turn.get("question_type")
-                                or metadata.get("question_type")
-                            )
-                            if (
-                                raw_turn.get("question_type")
-                                or metadata.get("question_type")
-                            )
-                            else None
-                        ),
-                        response_type=(
-                            str(
-                                raw_turn.get("response_type")
-                                or metadata.get("response_type")
-                            )
-                            if (
-                                raw_turn.get("response_type")
-                                or metadata.get("response_type")
-                            )
-                            else None
-                        ),
-                    )
-                )
-
-    return APIResponse(
-        message="Transcript retrieved successfully.",
-        data=InterviewTranscriptResponse(
-            candidate_assessment_id=ca_id,
-            candidate_name=ca.candidate.full_name if ca.candidate else None,
-            assessment_title=ca.assessment.title if ca.assessment else None,
-            total_elapsed_secs=total_elapsed_secs,
-            turns=turns,
         ),
     )
 

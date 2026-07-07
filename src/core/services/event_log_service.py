@@ -21,18 +21,12 @@ class EventLogService:
         await self._repository.create(event)
 
 
-async def record_event_in_background(event: EventLogCreate) -> None:
-    """Write an event in its own transaction for workers and callbacks."""
-
-    async with async_session_scope() as session:
-        await EventLogService(EventLogsRepository(session)).record(event)
-
-
 async def try_record_event_in_background(event: EventLogCreate) -> None:
     """Best-effort logging that never changes the primary operation outcome."""
 
     try:
-        await record_event_in_background(event)
+        async with async_session_scope() as session:
+            await EventLogService(EventLogsRepository(session)).record(event)
     except Exception:
         logger.exception(
             "Failed to persist event log",

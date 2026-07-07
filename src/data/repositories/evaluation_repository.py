@@ -46,7 +46,7 @@ class EvaluationRepository:
 
     async def list_by_recruiter(
         self, recruiter_id: uuid.UUID
-    ) -> list[tuple[InterviewEvaluation, object, object, object]]:
+    ) -> list[tuple[InterviewEvaluation, CandidateAssessment, Candidate, Assessment]]:
         """Return evaluated interviews for all assessments owned by a recruiter."""
         statement = (
             select(InterviewEvaluation, CandidateAssessment, Candidate, Assessment)

@@ -54,8 +54,10 @@ celery_app.conf.update(
     ),
     task_routes={
         "core.process_assessment": {"queue": "core.assessment"},
+        "core.dispatch_assessment_cancellations": {"queue": "core.assessment"},
         "core.send_invitation_email": {"queue": "core.email"},
         "core.send_report_ready_email": {"queue": "core.email"},
+        "core.send_cancellation_email": {"queue": "core.email"},
     },
     task_serializer="json",
     task_track_started=True,

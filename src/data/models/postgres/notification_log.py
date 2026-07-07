@@ -39,7 +39,8 @@ class NotificationLog(Base):
         index=True,
     )
     # INVITATION | REMINDER_24H | REMINDER_8H | REMINDER_1H |
-    # APPROVAL | REJECTION | REPORT_READY | SESSION_DEACTIVATED
+    # APPROVAL | REJECTION | REPORT_READY | ASSESSMENT_CANCELLATION |
+    # SESSION_DEACTIVATED
     notification_type: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     recipient_email: Mapped[str] = mapped_column(Text, nullable=False)
     sent_at: Mapped[datetime] = mapped_column(

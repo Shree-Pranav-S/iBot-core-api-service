@@ -46,11 +46,11 @@ class InterviewSessionRepository:
         """Initialize the repository with the active database session."""
         self._session = session
 
-    async def get_session_by_candidate_assessment_id(
+    async def get_by_candidate_assessment_id(
         self,
         candidate_assessment_id: str | uuid.UUID,
-    ) -> dict[str, Any]:
-        """Return the session belonging to a candidate assessment."""
+    ) -> InterviewSession | None:
+        """Return the interview session model for a candidate assessment."""
 
         result = await self._session.execute(
             select(InterviewSession).where(
@@ -58,7 +58,15 @@ class InterviewSessionRepository:
                 == _uuid(candidate_assessment_id)
             )
         )
-        session = result.scalar_one_or_none()
+        return result.scalar_one_or_none()
+
+    async def get_session_by_candidate_assessment_id(
+        self,
+        candidate_assessment_id: str | uuid.UUID,
+    ) -> dict[str, Any]:
+        """Return the session belonging to a candidate assessment."""
+
+        session = await self.get_by_candidate_assessment_id(candidate_assessment_id)
         return _session_dict(session) if session else {}
 
     async def get_or_create_session(

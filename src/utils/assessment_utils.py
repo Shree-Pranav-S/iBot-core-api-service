@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Sequence
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
@@ -20,6 +21,225 @@ from src.schemas.assessment import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_skill_key(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _skill_alias_tokens(value: str) -> set[str]:
+    normalized = _normalize_skill_key(value)
+    if not normalized:
+        return set()
+    tokens = set(re.findall(r"[a-z0-9\+#\.]+", normalized))
+    tokens.add(normalized)
+    # Common shorthand/long-form normalizations
+    if normalized in {"sql", "structured query language"}:
+        tokens.update({"sql", "structured query language"})
+    return {token for token in tokens if token}
+
+
+def _resolve_override_for_skill(
+    skill_name: str, overrides: list[FocusAreaOverride]
+) -> float | None:
+    """Return the override weight for a skill using exact + token matching."""
+    skill_key = _normalize_skill_key(skill_name)
+    skill_tokens = _skill_alias_tokens(skill_name)
+    if not skill_tokens and not skill_key:
+        return None
+
+    best_value: float | None = None
+    best_score = -1
+    for override in overrides:
+        override_key = _normalize_skill_key(override.skill)
+        override_tokens = _skill_alias_tokens(override.skill)
+        if not override_key and not override_tokens:
+            continue
+
+        score = 0
+        if skill_key and override_key and skill_key == override_key:
+            score = 3
+        elif (
+            skill_tokens
+            and override_tokens
+            and skill_tokens.intersection(override_tokens)
+        ):
+            score = 2
+        elif (
+            skill_key
+            and override_key
+            and (skill_key in override_key or override_key in skill_key)
+        ):
+            score = 1
+
+        if score > best_score:
+            best_score = score
+            best_value = override.weight_override
+
+    return best_value if best_score > 0 else None
+
+
+def _allocate_minutes_by_weight(
+    total_minutes: float, effective_weights: Sequence[float]
+) -> list[float]:
+    """
+    Allocate minutes in 0.1 precision with a 0.5-minute minimum per skill.
+
+    Returns a list that sums exactly to total_minutes.
+    """
+    skill_count = len(effective_weights)
+    if skill_count == 0:
+        return []
+
+    total_units = int(round(total_minutes * 10))
+    min_units_per_skill = 5
+    base_units = min_units_per_skill * skill_count
+    if total_units <= base_units:
+        return [min_units_per_skill / 10.0] * skill_count
+
+    extra_units = total_units - base_units
+    total_weight = sum(max(weight, 0.0) for weight in effective_weights)
+    if total_weight <= 0:
+        distributed = [extra_units // skill_count] * skill_count
+        for index in range(extra_units % skill_count):
+            distributed[index] += 1
+    else:
+        scaled = [
+            extra_units * max(weight, 0.0) / total_weight
+            for weight in effective_weights
+        ]
+        distributed = [int(value) for value in scaled]
+        remainder = extra_units - sum(distributed)
+        if remainder > 0:
+            order = sorted(
+                range(skill_count),
+                key=lambda idx: (
+                    scaled[idx] - distributed[idx],
+                    effective_weights[idx],
+                ),
+                reverse=True,
+            )
+            for idx in order[:remainder]:
+                distributed[idx] += 1
+
+    return [(min_units_per_skill + extra) / 10.0 for extra in distributed]
+
+
+def _enforce_focus_area_overrides(
+    combined: JDAnalysisAndInterviewPlan, focus_areas: list[FocusAreaOverride]
+) -> None:
+    """Deterministically enforce skill override weights on interview plan sections."""
+    # Recompute technical section order and durations from JD skills + overrides.
+    total_mins = int(combined.interview_plan.total_mins)
+    total_units = total_mins * 10
+    self_intro_units = int(round(min(total_mins * 0.1, 1.0) * 10))
+    behavioural_units = int(round(total_mins * 0.1 * 10))
+    technical_units = max(total_units - self_intro_units - behavioural_units, 0)
+
+    existing_self_intro = next(
+        (
+            section
+            for section in combined.interview_plan.sections
+            if section.section_name == "self_intro"
+        ),
+        None,
+    )
+    existing_behavioural = next(
+        (
+            section
+            for section in combined.interview_plan.sections
+            if section.section_name == "behavioural_cultural"
+        ),
+        None,
+    )
+    existing_technical_by_key = {
+        _normalize_skill_key(section.skill): section
+        for section in combined.interview_plan.sections
+        if section.skill
+    }
+
+    jd_skills = combined.jd_analysis.skills
+    scored_skills: list[tuple[str, float, float]] = []
+    for skill in jd_skills:
+        override = _resolve_override_for_skill(skill.skill, focus_areas)
+        effective = override if override is not None else skill.priority_score
+        if override is not None:
+            # Manual override must win over LLM-provided priority.
+            skill.priority_score = override
+        scored_skills.append((skill.skill, skill.priority_score, effective))
+
+    # Ensure manually overridden skills are represented even if the LLM missed them.
+    existing_skill_keys = {_normalize_skill_key(skill.skill) for skill in jd_skills}
+    for fa_override in focus_areas:
+        override_key = _normalize_skill_key(fa_override.skill)
+        if override_key and override_key not in existing_skill_keys:
+            from src.schemas.assessment import SkillPriority
+
+            combined.jd_analysis.skills.append(
+                SkillPriority(
+                    skill=fa_override.skill.strip(),
+                    priority_score=fa_override.weight_override,
+                    reasoning="Manually prioritized via recruiter focus-area override.",
+                )
+            )
+            scored_skills.append(
+                (
+                    fa_override.skill.strip(),
+                    fa_override.weight_override,
+                    fa_override.weight_override,
+                )
+            )
+            existing_skill_keys.add(override_key)
+
+    max_skill_count = technical_units // 5
+    if max_skill_count <= 0:
+        selected: list[tuple[str, float, float]] = []
+    else:
+        selected = sorted(
+            scored_skills,
+            key=lambda item: (item[2], item[1]),
+            reverse=True,
+        )[:max_skill_count]
+
+    weights = [item[2] for item in selected]
+    allocations = _allocate_minutes_by_weight(technical_units / 10.0, weights)
+
+    rebuilt_sections = []
+    if existing_self_intro is not None:
+        existing_self_intro.skill = None
+        existing_self_intro.allocated_mins = self_intro_units / 10.0
+        rebuilt_sections.append(existing_self_intro)
+
+    for (skill_name, _priority, _effective), allocated in zip(
+        selected, allocations, strict=False
+    ):
+        key = _normalize_skill_key(skill_name)
+        section = existing_technical_by_key.get(key)
+        if section is None:
+            from src.schemas.assessment import TechnicalInterviewSection
+
+            section = TechnicalInterviewSection(
+                section_name=skill_name,
+                skill=skill_name,
+                allocated_mins=allocated,
+                expected_signals=[],
+            )
+        else:
+            section.section_name = skill_name
+            section.skill = skill_name
+            section.allocated_mins = allocated
+        rebuilt_sections.append(section)
+
+    if existing_behavioural is not None:
+        existing_behavioural.skill = None
+        existing_behavioural.allocated_mins = behavioural_units / 10.0
+        if not existing_behavioural.expected_signals:
+            existing_behavioural.expected_signals = (
+                combined.jd_analysis.behavioural_signals[:4]
+            )
+        rebuilt_sections.append(existing_behavioural)  # type: ignore[arg-type]
+
+    combined.interview_plan.sections = rebuilt_sections  # type: ignore[assignment]
 
 
 async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
@@ -597,6 +817,8 @@ async def run_jd_analysis_and_interview_plan(
             combined.interview_plan.inferred_difficulty = (
                 combined.jd_analysis.inferred_difficulty
             )
+            if focus_areas:
+                _enforce_focus_area_overrides(combined, focus_areas)
             return combined
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_exc = exc
