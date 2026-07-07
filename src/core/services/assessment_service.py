@@ -5,9 +5,6 @@ import logging
 import uuid
 from datetime import datetime
 
-from groq import AsyncGroq
-
-from src.config.settings import settings
 from src.core.exceptions import (
     BadRequestException,
     ForbiddenException,
@@ -20,8 +17,8 @@ from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
 from src.handlers.celery_tasks.assessment_tasks import enqueue_assessment_processing
+from src.handlers.celery_tasks.notification_tasks import enqueue_cancellation_email
 from src.schemas.assessment import FocusAreaOverride
-from src.utils.candidates import send_cancellation_email
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +29,6 @@ class AssessmentService:
     def __init__(self, repository: AssessmentRepository) -> None:
         """Initialize the assessment service with its repository."""
         self._repository = repository
-        self._groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
 
     async def get_assessment_by_id(
         self, assessment_id: uuid.UUID, recruiter_id: uuid.UUID
@@ -134,6 +130,7 @@ class AssessmentService:
                 ).get_all_by_assessment(assessment_id)
                 candidates_info = [
                     {
+                        "candidate_assessment_id": record.id,
                         "candidate_name": record.candidate.full_name,
                         "recipient_email": record.candidate.email,
                         "assessment_title": record.assessment.title,
@@ -151,14 +148,13 @@ class AssessmentService:
                 return
 
             for info in candidates_info:
-                # Fire and forget email dispatch
-                asyncio.create_task(
-                    send_cancellation_email(
-                        candidate_name=info["candidate_name"],
-                        recipient_email=info["recipient_email"],
-                        assessment_title=info["assessment_title"],
-                        role_name=info["role_name"],
-                    )
+                # Fire and forget email dispatch via Celery
+                enqueue_cancellation_email(
+                    ca_record_id=info["candidate_assessment_id"],
+                    candidate_name=info["candidate_name"],
+                    recipient_email=info["recipient_email"],
+                    assessment_title=info["assessment_title"],
+                    role_name=info["role_name"],
                 )
 
             logger.info(
