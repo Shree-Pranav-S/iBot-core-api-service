@@ -13,44 +13,17 @@ from src.core.exceptions import (
     ForbiddenException,
     NotFoundException,
 )
-from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.clients.postgres_client import async_session_scope
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
 from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
+from src.handlers.celery_tasks.assessment_tasks import enqueue_assessment_processing
 from src.schemas.assessment import FocusAreaOverride
-from src.schemas.realtime import RecruiterEventType
-from src.utils.assessment_utils import (
-    format_jd_to_markdown,
-    parse_pdf_jd,
-    run_jd_analysis_and_interview_plan,
-)
 from src.utils.candidates import send_cancellation_email
 
 logger = logging.getLogger(__name__)
-
-
-def _enqueue_assessment_processing_after_commit(
-    *,
-    assessment_id: uuid.UUID,
-    jd_text: str | None,
-    jd_file_bytes: bytes | None,
-    jd_filename: str | None,
-    focus_areas: list[FocusAreaOverride] | None,
-) -> None:
-    from src.handlers.celery_tasks.assessment_tasks import (
-        enqueue_assessment_processing,
-    )
-
-    enqueue_assessment_processing(
-        assessment_id=assessment_id,
-        jd_text=jd_text,
-        jd_file_bytes=jd_file_bytes,
-        jd_filename=jd_filename,
-        focus_areas=focus_areas,
-    )
 
 
 class AssessmentService:
@@ -140,7 +113,7 @@ class AssessmentService:
 
         assessment = await self._repository.create_assessment(db_assessment)
         self._repository.register_after_commit_callback(
-            lambda: _enqueue_assessment_processing_after_commit(
+            lambda: enqueue_assessment_processing(
                 assessment_id=assessment.id,
                 jd_text=jd_text,
                 jd_file_bytes=jd_file_bytes,
@@ -149,113 +122,6 @@ class AssessmentService:
             )
         )
         return assessment
-
-    @staticmethod
-    async def process_assessment_in_background(
-        assessment_id: uuid.UUID,
-        jd_text: str | None = None,
-        jd_file_bytes: bytes | None = None,
-        jd_filename: str | None = None,
-        focus_areas: list[FocusAreaOverride] | None = None,
-    ) -> None:
-        """Background task to parse PDF, run LLM analysis, generate plan, and activate assessment."""
-        assessment_info: tuple[uuid.UUID, str, str, int] | None = None
-        try:
-            async with async_session_scope() as session:
-                assessment = await AssessmentRepository(session).get_by_id(
-                    assessment_id
-                )
-                if not assessment:
-                    logger.error(
-                        "Assessment %s not found in background task.", assessment_id
-                    )
-                    return
-                assessment_info = (
-                    assessment.recruiter_id,
-                    assessment.title,
-                    assessment.role_name,
-                    assessment.interview_duration_mins,
-                )
-
-            parsed_jd_text = ""
-            if jd_file_bytes and jd_filename:
-                parsed_jd_text = await parse_pdf_jd(jd_file_bytes, jd_filename)
-            elif jd_text:
-                parsed_jd_text = jd_text
-
-            if not parsed_jd_text.strip():
-                raise ValueError("Job description content is empty.")
-
-            # Run one LLM call that generates both JD analysis and the executable plan.
-            assert assessment_info is not None
-            recruiter_id, title, role_name, duration_mins = assessment_info
-            groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
-            generated = await run_jd_analysis_and_interview_plan(
-                parsed_jd_text,
-                duration_mins,
-                focus_areas,
-                groq_client,
-            )
-            jd_analysis = generated.jd_analysis
-            interview_plan = generated.interview_plan
-            # Best-effort: store a neatly formatted Markdown JD for display.
-            formatted_jd_text = await format_jd_to_markdown(
-                parsed_jd_text,
-                groq_client,
-            )
-            async with async_session_scope() as session:
-                await AssessmentRepository(session).activate_assessment(
-                    assessment_id,
-                    formatted_jd_text,
-                    jd_analysis.model_dump(),
-                    interview_plan.model_dump(),
-                )
-            await publish_recruiter_event(
-                recruiter_id=recruiter_id,
-                event_type=RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED,
-                payload={
-                    "assessment_id": str(assessment_id),
-                    "title": title,
-                    "role_name": role_name,
-                    "status": "ACTIVE",
-                },
-            )
-            logger.info(
-                "Successfully processed assessment %s asynchronously.", assessment_id
-            )
-        except Exception:
-            logger.exception(
-                "Failed to process assessment %s in background.", assessment_id
-            )
-            try:
-                failure_info: tuple[uuid.UUID, str, str] | None = None
-                async with async_session_scope() as session:
-                    repository = AssessmentRepository(session)
-                    assessment = await repository.get_by_id(assessment_id)
-                    if assessment is not None:
-                        failure_info = (
-                            assessment.recruiter_id,
-                            assessment.title,
-                            assessment.role_name,
-                        )
-                        await repository.close_assessment_on_failure(assessment_id)
-                if failure_info is not None:
-                    recruiter_id, title, role_name = failure_info
-                    await publish_recruiter_event(
-                        recruiter_id=recruiter_id,
-                        event_type=(RecruiterEventType.ASSESSMENT_PROCESSING_FAILED),
-                        payload={
-                            "assessment_id": str(assessment_id),
-                            "title": title,
-                            "role_name": role_name,
-                            "status": "CLOSED",
-                        },
-                    )
-            except Exception:
-                logger.exception(
-                    "Failed to update status to CLOSED after error on assessment %s",
-                    assessment_id,
-                )
 
     async def send_cancellation_emails_in_background(
         self, assessment_id: uuid.UUID

@@ -8,11 +8,22 @@ import time
 import uuid
 from typing import Any
 
-from src.core.services.assessment_service import AssessmentService
+from groq import AsyncGroq
+
+from src.config.settings import settings
 from src.core.services.event_log_service import try_record_event_in_background
+from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.clients.celery_client import celery_app, run_async
+from src.data.clients.postgres_client import async_session_scope
+from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import FocusAreaOverride
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
+from src.schemas.realtime import RecruiterEventType
+from src.utils.assessment_utils import (
+    format_jd_to_markdown,
+    parse_pdf_jd,
+    run_jd_analysis_and_interview_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +47,102 @@ async def _process_assessment(
         else None
     )
 
-    await AssessmentService.process_assessment_in_background(
-        assessment_id=uuid.UUID(assessment_id),
-        jd_text=jd_text,
-        jd_file_bytes=file_bytes,
-        jd_filename=jd_filename,
-        focus_areas=focus_areas,
-    )
+    assessment_uuid = uuid.UUID(assessment_id)
+    assessment_info: tuple[uuid.UUID, str, str, int] | None = None
+    try:
+        async with async_session_scope() as session:
+            assessment = await AssessmentRepository(session).get_by_id(assessment_uuid)
+            if not assessment:
+                logger.error(
+                    "Assessment %s not found in background task.", assessment_uuid
+                )
+                return
+            assessment_info = (
+                assessment.recruiter_id,
+                assessment.title,
+                assessment.role_name,
+                assessment.interview_duration_mins,
+            )
+
+        parsed_jd_text = ""
+        if file_bytes and jd_filename:
+            parsed_jd_text = await parse_pdf_jd(file_bytes, jd_filename)
+        elif jd_text:
+            parsed_jd_text = jd_text
+
+        if not parsed_jd_text.strip():
+            raise ValueError("Job description content is empty.")
+
+        # Run one LLM call that generates both JD analysis and the executable plan.
+        assert assessment_info is not None
+        recruiter_id, title, role_name, duration_mins = assessment_info
+        groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        generated = await run_jd_analysis_and_interview_plan(
+            parsed_jd_text,
+            duration_mins,
+            focus_areas,
+            groq_client,
+        )
+        jd_analysis = generated.jd_analysis
+        interview_plan = generated.interview_plan
+        # Best-effort: store a neatly formatted Markdown JD for display.
+        formatted_jd_text = await format_jd_to_markdown(
+            parsed_jd_text,
+            groq_client,
+        )
+        async with async_session_scope() as session:
+            await AssessmentRepository(session).activate_assessment(
+                assessment_uuid,
+                formatted_jd_text,
+                jd_analysis.model_dump(),
+                interview_plan.model_dump(),
+            )
+        await publish_recruiter_event(
+            recruiter_id=recruiter_id,
+            event_type=RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED,
+            payload={
+                "assessment_id": str(assessment_uuid),
+                "title": title,
+                "role_name": role_name,
+                "status": "ACTIVE",
+            },
+        )
+        logger.info(
+            "Successfully processed assessment %s asynchronously.", assessment_uuid
+        )
+    except Exception:
+        logger.exception(
+            "Failed to process assessment %s in background.", assessment_uuid
+        )
+        try:
+            failure_info: tuple[uuid.UUID, str, str] | None = None
+            async with async_session_scope() as session:
+                repository = AssessmentRepository(session)
+                assessment = await repository.get_by_id(assessment_uuid)
+                if assessment is not None:
+                    failure_info = (
+                        assessment.recruiter_id,
+                        assessment.title,
+                        assessment.role_name,
+                    )
+                    await repository.close_assessment_on_failure(assessment_uuid)
+            if failure_info is not None:
+                recruiter_id, title, role_name = failure_info
+                await publish_recruiter_event(
+                    recruiter_id=recruiter_id,
+                    event_type=(RecruiterEventType.ASSESSMENT_PROCESSING_FAILED),
+                    payload={
+                        "assessment_id": str(assessment_uuid),
+                        "title": title,
+                        "role_name": role_name,
+                        "status": "CLOSED",
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "Failed to update status to CLOSED after error on assessment %s",
+                assessment_uuid,
+            )
 
 
 @celery_app.task(  # type: ignore
