@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from src.config.settings import settings
+from src.core.exceptions import ReportContextNotFoundException
 from src.core.services.event_log_service import try_record_event_in_background
 from src.data.clients.celery_client import celery_app, run_async
 from src.data.clients.postgres_client import async_session_scope
@@ -353,11 +354,11 @@ async def _send_report_ready(payload: dict[str, Any]) -> None:
         )
 
     if context is None:
-        raise ValueError(
+        raise ReportContextNotFoundException(
             f"No report-ready email context found for {ca_record_id}",
         )
 
-    report_link = f"{settings.FRONTEND_URL.rstrip('/')}/evaluations"
+    report_link = settings.evaluations_url()
 
     await send_report_ready_email(
         recruiter_email=recipient_email,

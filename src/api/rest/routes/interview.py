@@ -3,10 +3,9 @@
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
-from src.core.exceptions import NotFoundException
+from src.api.rest.dependencies import get_candidate_assessment_repository
+from src.core.exceptions import InvitationNotFoundException
 from src.data.repositories.candidate_assessment_repository import (
     CandidateAssessmentRepository,
 )
@@ -24,19 +23,21 @@ router = APIRouter(prefix="/interview", tags=["interview"])
 )
 async def validate_token(
     token: uuid.UUID,
-    db: AsyncSession = Depends(get_db_session),
+    repository: CandidateAssessmentRepository = Depends(
+        get_candidate_assessment_repository
+    ),
 ) -> APIResponse[TokenValidationResponse]:
     """Validate candidate's token and return details for the waiting room."""
-    ca = await CandidateAssessmentRepository(db).get_invitation_context(token)
+    ca = await repository.get_invitation_context(token)
 
     if ca is None:
-        raise NotFoundException("Candidate invitation token not found.")
+        raise InvitationNotFoundException()
 
     candidate = ca.candidate
     assessment = ca.assessment
 
     if candidate is None or assessment is None:
-        raise NotFoundException(
+        raise InvitationNotFoundException(
             "Candidate or assessment not found for this invitation."
         )
 

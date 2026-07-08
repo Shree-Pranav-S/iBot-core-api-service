@@ -7,12 +7,11 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis
 
-from src.api.rest.dependencies import get_redis_client
-from src.core.exceptions import AuthenticationException, BadRequestException
+from src.api.rest.dependencies import get_redis_client, require_recruiter_id
 from src.core.services.realtime_event_service import recruiter_event_channel
 
 router = APIRouter(prefix="/sse", tags=["realtime"])
@@ -25,17 +24,10 @@ KEEPALIVE_INTERVAL_SECONDS = 15.0
     summary="Stream live dashboard updates for the authenticated recruiter",
 )
 async def stream_recruiter_events(
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     redis_client: Redis = Depends(get_redis_client),
 ) -> StreamingResponse:
     """Subscribe only to the Redis channel belonging to the authenticated user."""
-
-    if not x_user_id:
-        raise AuthenticationException("Missing identity header.")
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
 
     async def event_stream() -> AsyncGenerator[str, None]:
         """Yield recruiter dashboard events and keep-alives as SSE frames."""

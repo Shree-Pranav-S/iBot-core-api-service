@@ -40,6 +40,8 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "path": request.url.path,
                 "method": request.method,
                 "status_code": exc.status_code,
+                "error_code": getattr(exc, "error_code", None),
+                "exception_type": type(exc).__name__,
             },
         )
         errors = (

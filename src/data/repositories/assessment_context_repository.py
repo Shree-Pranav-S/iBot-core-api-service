@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.exceptions import InterviewConfigurationException
 from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
@@ -91,7 +92,9 @@ class AssessmentContextRepository:
         result = await self._session.execute(statement)
         started_at = result.scalar_one()
         if started_at is None:
-            raise RuntimeError("Interview start timestamp was not persisted")
+            raise InterviewConfigurationException(
+                "Interview start timestamp was not persisted"
+            )
         return started_at
 
     async def mark_candidate_completed(

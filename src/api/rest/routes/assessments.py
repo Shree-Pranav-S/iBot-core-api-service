@@ -6,19 +6,12 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
-    Header,
     UploadFile,
     status,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
-from src.core.exceptions import (
-    AuthenticationException,
-    BadRequestException,
-)
+from src.api.rest.dependencies import get_assessment_service, require_recruiter_id
 from src.core.services.assessment_service import AssessmentService
-from src.data.repositories.assessment_repository import AssessmentRepository
 from src.schemas.assessment import (
     AssessmentCreateForm,
     AssessmentResponse,
@@ -28,13 +21,6 @@ from src.schemas.assessment import (
 from src.schemas.common import APIResponse
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
-
-
-def get_assessment_service(
-    db: AsyncSession = Depends(get_db_session),
-) -> AssessmentService:
-    """Build the assessment service from request-scoped dependencies."""
-    return AssessmentService(AssessmentRepository(db))
 
 
 @router.post(
@@ -47,20 +33,10 @@ def get_assessment_service(
 async def create_assessment(
     form_data: AssessmentCreateForm = Depends(),
     jd_file: UploadFile | None = File(None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     service: AssessmentService = Depends(get_assessment_service),
 ) -> APIResponse[AssessmentResponse]:
     """Create a new assessment configuration with JD analysis."""
-    if not x_user_id:
-        raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
-        )
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
     file_bytes = None
     filename = None
     if jd_file:
@@ -93,20 +69,10 @@ async def create_assessment(
     description="List all assessments configured by the authenticated recruiter.",
 )
 async def list_assessments(
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     service: AssessmentService = Depends(get_assessment_service),
 ) -> APIResponse[list[AssessmentSummaryResponse]]:
     """Return all assessments owned by the logged-in recruiter."""
-    if not x_user_id:
-        raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
-        )
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
     assessments = await service.get_recruiter_assessments(recruiter_id)
     return APIResponse(
         message="Assessments retrieved successfully.",
@@ -122,20 +88,10 @@ async def list_assessments(
 )
 async def get_assessment(
     assessment_id: uuid.UUID,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     service: AssessmentService = Depends(get_assessment_service),
 ) -> APIResponse[AssessmentResponse]:
     """Return the detailed view of an assessment."""
-    if not x_user_id:
-        raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
-        )
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
     assessment = await service.get_assessment_by_id(assessment_id, recruiter_id)
     return APIResponse(
         message="Assessment details retrieved successfully.",
@@ -152,20 +108,10 @@ async def get_assessment(
 async def update_assessment_status(
     assessment_id: uuid.UUID,
     payload: AssessmentUpdateStatusRequest,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     service: AssessmentService = Depends(get_assessment_service),
 ) -> APIResponse[AssessmentResponse]:
     """Transition the assessment status."""
-    if not x_user_id:
-        raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
-        )
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
     assessment = await service.update_status(
         assessment_id, recruiter_id, payload.status
     )

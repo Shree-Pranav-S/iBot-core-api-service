@@ -11,10 +11,19 @@ from datetime import UTC, datetime, timedelta
 from redis.asyncio import Redis
 
 from src.core.exceptions import (
-    AuthenticationException,
-    BadRequestException,
-    ConflictException,
-    NotFoundException,
+    AccountNotFoundException,
+    EmailAlreadyRegisteredException,
+    ExpiredRefreshTokenException,
+    InactiveAccountException,
+    InactiveAccountOperationException,
+    InactiveOrMissingRecruiterException,
+    InvalidCredentialsException,
+    InvalidOtpException,
+    InvalidRefreshTokenException,
+    OtpExpiredException,
+    OtpStillActiveException,
+    PasswordResetUnavailableException,
+    RecruiterNotFoundException,
 )
 from src.core.services.event_log_service import try_record_event_in_background
 from src.data.models.postgres.recruiter import Recruiter
@@ -58,7 +67,7 @@ class AuthService:
         )
         if existing_recruiter is not None:
             logger.info("Duplicate recruiter registration attempted")
-            raise ConflictException("A recruiter with this email already exists.")
+            raise EmailAlreadyRegisteredException()
 
         return await self._repository.create_recruiter(
             full_name=payload.full_name,
@@ -82,14 +91,14 @@ class AuthService:
             recruiter.hashed_password,
         ):
             logger.info("Recruiter login failed")
-            raise AuthenticationException("Invalid email or password.")
+            raise InvalidCredentialsException()
 
         if not recruiter.is_active:
             logger.info(
                 "Inactive recruiter login denied",
                 extra={"recruiter_id": str(recruiter.id)},
             )
-            raise AuthenticationException("Recruiter account is inactive.")
+            raise InactiveAccountException()
 
         # Revoke existing sessions to prevent multiple logins if configured (superseding sessions)
         await self._repository.revoke_all_recruiter_tokens(recruiter.id)
@@ -136,7 +145,7 @@ class AuthService:
 
         if stored_token is None or stored_token.is_revoked:
             logger.warning("Revoked or invalid refresh token attempt")
-            raise AuthenticationException("Invalid or revoked refresh token.")
+            raise InvalidRefreshTokenException()
 
         db_expires = stored_token.expires_at
         if db_expires.tzinfo is None:
@@ -144,14 +153,14 @@ class AuthService:
 
         if db_expires < datetime.now(UTC):
             logger.info("Expired refresh token attempt")
-            raise AuthenticationException("Expired refresh token.")
+            raise ExpiredRefreshTokenException()
 
         # Load recruiter
         recruiter = await self._repository.get_recruiter_by_id(
             stored_token.recruiter_id
         )
         if recruiter is None or not recruiter.is_active:
-            raise AuthenticationException("Recruiter account is inactive or not found.")
+            raise InactiveOrMissingRecruiterException()
 
         # Invalidate old refresh token (token rotation)
         await self._repository.revoke_refresh_token(token_hash)
@@ -201,15 +210,15 @@ class AuthService:
         """Generate a 4-digit OTP, store in Redis, and send via email."""
 
         if self._redis is None:
-            raise BadRequestException("Password reset service is unavailable.")
+            raise PasswordResetUnavailableException()
 
         normalized_email = payload.email.lower()
         recruiter = await self._repository.get_recruiter_by_email(normalized_email)
         if recruiter is None:
-            raise NotFoundException("No account found with this email address.")
+            raise AccountNotFoundException()
 
         if not recruiter.is_active:
-            raise BadRequestException("This account is inactive.")
+            raise InactiveAccountOperationException()
 
         otp = str(random.randint(1000, 9999))
         otp_data = json.dumps(
@@ -228,18 +237,18 @@ class AuthService:
         """Verify the OTP and update the recruiter password."""
 
         if self._redis is None:
-            raise BadRequestException("Password reset service is unavailable.")
+            raise PasswordResetUnavailableException()
 
         normalized_email = payload.email.lower()
         redis_key = f"otp:{normalized_email}"
         stored_data = await self._redis.get(redis_key)
 
         if stored_data is None:
-            raise BadRequestException("OTP expired or not requested.")
+            raise OtpExpiredException()
 
         otp_record = json.loads(stored_data)
         if otp_record["otp"] != payload.otp:
-            raise BadRequestException("Invalid OTP.")
+            raise InvalidOtpException()
 
         # Update password in database
         updated = await self._repository.update_password(
@@ -247,7 +256,7 @@ class AuthService:
             hashed_password=otp_record["new_password_hash"],
         )
         if not updated:
-            raise NotFoundException("Recruiter account not found.")
+            raise RecruiterNotFoundException()
 
         # Clean up OTP from Redis
         await self._redis.delete(redis_key)
@@ -274,7 +283,7 @@ class AuthService:
         """Resend the OTP if the previous one has expired."""
 
         if self._redis is None:
-            raise BadRequestException("Password reset service is unavailable.")
+            raise PasswordResetUnavailableException()
 
         normalized_email = payload.email.lower()
         redis_key = f"otp:{normalized_email}"
@@ -282,16 +291,14 @@ class AuthService:
         # Check if an OTP is still active
         existing = await self._redis.get(redis_key)
         if existing is not None:
-            raise BadRequestException(
-                "Please wait for the current OTP to expire before requesting a new one."
-            )
+            raise OtpStillActiveException()
 
         recruiter = await self._repository.get_recruiter_by_email(normalized_email)
         if recruiter is None:
-            raise NotFoundException("No account found with this email address.")
+            raise AccountNotFoundException()
 
         if not recruiter.is_active:
-            raise BadRequestException("This account is inactive.")
+            raise InactiveAccountOperationException()
 
         otp = str(random.randint(1000, 9999))
         otp_data = json.dumps(
@@ -309,5 +316,5 @@ class AuthService:
         """Return an active recruiter profile by identifier."""
         recruiter = await self._repository.get_recruiter_by_id(recruiter_id)
         if recruiter is None:
-            raise NotFoundException("Recruiter not found.")
+            raise RecruiterNotFoundException()
         return recruiter

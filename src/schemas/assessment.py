@@ -12,7 +12,7 @@ from typing import Literal
 from fastapi import Form
 from pydantic import ConfigDict, Field, ValidationError, model_validator
 
-from src.core.exceptions import BadRequestException
+from src.core.exceptions import AssessmentValidationException
 from src.schemas.base import AppBaseModel, ORMBaseModel
 
 # ── Shared literals ────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ class BehaviouralCulturalSection(AppBaseModel):
     allocated_mins: float = Field(
         ...,
         gt=0,
-        description="Deterministically normalized to 10 percent of total interview time",
+        description="Deterministically normalized to no more than 10 percent of total interview time",
     )
     expected_signals: list[str] = Field(
         default_factory=list,
@@ -250,7 +250,7 @@ class AssessmentCreateForm:
                 ]
 
             except Exception as exc:
-                raise BadRequestException(
+                raise AssessmentValidationException(
                     f"Invalid focus_areas override payload: {exc}"
                 ) from exc
 
@@ -273,7 +273,9 @@ class AssessmentCreateForm:
                     for err in errors
                 ]
             )
-            raise BadRequestException(f"Validation error: {err_msg}") from val_err
+            raise AssessmentValidationException(
+                f"Validation error: {err_msg}"
+            ) from val_err
 
         # Store validated attributes on the form instance for direct access.
         self.title = self.model.title

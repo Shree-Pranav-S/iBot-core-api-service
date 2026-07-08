@@ -9,9 +9,14 @@ from pathlib import Path
 
 from src.config.settings import settings
 from src.core.exceptions import (
+    AssessmentAccessDeniedException,
+    AssessmentNotFoundException,
     BadRequestException,
-    ForbiddenException,
-    NotFoundException,
+    CandidateAccessDeniedException,
+    CandidateNotFoundException,
+    CandidateRegistrationNotFoundException,
+    CsvValidationException,
+    DuplicateEnrollmentException,
 )
 from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.clients.postgres_client import async_session_scope
@@ -95,7 +100,7 @@ class CandidateService:
             ex_end = existing_assessment.window_end
             overlaps = new_start < ex_end and ex_start < new_end
             if overlaps and enrollment.status not in COMPLETED_ENROLLMENT_STATUSES:
-                raise BadRequestException(
+                raise CsvValidationException(
                     f"Candidate already has an active enrollment in "
                     f"'{existing_assessment.title}' (ID: {existing_assessment.id}) "
                     f"whose interview window overlaps with the new assessment. "
@@ -108,9 +113,9 @@ class CandidateService:
         """Return all candidate-assessments for a given assessment, enforcing recruiter ownership."""
         assessment = await self._assessment_repo.get_by_id(assessment_id)
         if assessment is None:
-            raise NotFoundException("Assessment not found.")
+            raise AssessmentNotFoundException()
         if assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException("You do not have access to this assessment.")
+            raise AssessmentAccessDeniedException()
         return await self._ca_repo.get_all_by_assessment(assessment_id)
 
     async def bulk_upload_from_csv(
@@ -128,9 +133,9 @@ class CandidateService:
         """
         matched_assessment = await self._assessment_repo.get_by_id(assessment_id)
         if matched_assessment is None:
-            raise NotFoundException("Assessment not found.")
+            raise AssessmentNotFoundException()
         if matched_assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException("You do not have access to this assessment.")
+            raise AssessmentAccessDeniedException()
 
         assessment_id_str = str(assessment_id)
 
@@ -138,23 +143,25 @@ class CandidateService:
         try:
             text = file_bytes.decode("utf-8-sig")  # handles BOM
         except UnicodeDecodeError:
-            raise BadRequestException("CSV file must be UTF-8 encoded.")
+            raise CsvValidationException("CSV file must be UTF-8 encoded.")
 
         reader = csv.DictReader(io.StringIO(text))
         if reader.fieldnames is None:
-            raise BadRequestException("CSV file appears to be empty or has no headers.")
+            raise CsvValidationException(
+                "CSV file appears to be empty or has no headers."
+            )
 
         normalized_headers = {h.strip().lower() for h in reader.fieldnames}
         missing = REQUIRED_COLUMNS - normalized_headers
         if missing:
-            raise BadRequestException(
+            raise CsvValidationException(
                 f"CSV is missing required columns: {', '.join(sorted(missing))}. "
                 f"Expected: name, email, resume."
             )
 
         rows = list(reader)
         if not rows:
-            raise BadRequestException("CSV file contains no data rows.")
+            raise CsvValidationException("CSV file contains no data rows.")
 
         total_rows = len(rows)
         upload_id = uuid.uuid4()
@@ -345,8 +352,8 @@ class CandidateService:
             candidate_name,
             recipient_email,
         ) in processed_ca_records:
-            invitation_link = (
-                f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
+            invitation_link = settings.interview_invitation_url(
+                ca_record.invitation_token
             )
 
             def _trigger_email(
@@ -409,7 +416,7 @@ class CandidateService:
             matched_assessment is None
             or matched_assessment.recruiter_id != recruiter_id
         ):
-            raise BadRequestException(
+            raise CsvValidationException(
                 f"No assessment found with ID '{assessment_id}' for your account."
             )
 
@@ -419,7 +426,7 @@ class CandidateService:
                 existing_candidate.id
             )
             if existing_enrollments:
-                raise BadRequestException(
+                raise CsvValidationException(
                     "A candidate with this email already exists. "
                     "Use Enroll to add them to another assessment."
                 )
@@ -448,9 +455,7 @@ class CandidateService:
             candidate.id, matched_assessment.id
         )
         if existing_ca is not None:
-            raise BadRequestException(
-                "Candidate is already registered for this assessment."
-            )
+            raise DuplicateEnrollmentException()
 
         ca_record = await self._ca_repo.create(
             candidate_id=candidate.id,
@@ -463,9 +468,7 @@ class CandidateService:
             resume_file_bytes,
         )
 
-        invitation_link = (
-            f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
-        )
+        invitation_link = settings.interview_invitation_url(ca_record.invitation_token)
 
         def _trigger_single_email() -> None:
             enqueue_invitation_email(
@@ -525,23 +528,19 @@ class CandidateService:
         # Verify assessment belongs to recruiter
         new_assessment = await self._assessment_repo.get_by_id(assessment_id)
         if new_assessment is None or new_assessment.recruiter_id != recruiter_id:
-            raise BadRequestException(
-                f"No assessment found with ID '{assessment_id}' for your account."
-            )
+            raise AssessmentNotFoundException()
 
         # Verify candidate exists
         candidate = await self._candidate_repo.get_by_id(candidate_id)
         if candidate is None:
-            raise NotFoundException("Candidate not found.")
+            raise CandidateNotFoundException()
 
         # Prevent duplicate registration
         existing_ca = await self._ca_repo.get_by_candidate_and_assessment(
             candidate_id, assessment_id
         )
         if existing_ca is not None:
-            raise BadRequestException(
-                "Candidate is already registered for this assessment."
-            )
+            raise DuplicateEnrollmentException()
 
         all_enrollments = await self._ca_repo.get_all_by_candidate_id(candidate_id)
 
@@ -551,7 +550,7 @@ class CandidateService:
             for enrollment in all_enrollments
         )
         if not has_recruiter_enrollment and candidate.created_by != recruiter_id:
-            raise ForbiddenException(
+            raise CandidateAccessDeniedException(
                 "You do not have permission to enroll this candidate."
             )
 
@@ -592,9 +591,7 @@ class CandidateService:
             resume_parsed=resume_parsed,
         )
 
-        invitation_link = (
-            f"{settings.FRONTEND_URL}/interview?token={ca_record.invitation_token}"
-        )
+        invitation_link = settings.interview_invitation_url(ca_record.invitation_token)
 
         def _trigger_enroll_email() -> None:
             enqueue_invitation_email(
@@ -636,10 +633,10 @@ class CandidateService:
         """Validate ownership and persist the recruiter decision."""
         ca = await self._ca_repo.get_by_id(ca_id)
         if ca is None:
-            raise NotFoundException("Candidate registration not found.")
+            raise CandidateRegistrationNotFoundException()
 
         if ca.assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException(
+            raise CandidateAccessDeniedException(
                 "You do not have permission to update this candidate."
             )
 
@@ -675,10 +672,10 @@ class CandidateService:
         """Delete a candidate assessment and remove the candidate if no enrollments remain."""
         ca = await self._ca_repo.get_by_id(ca_id)
         if ca is None:
-            raise NotFoundException("Candidate registration not found.")
+            raise CandidateRegistrationNotFoundException()
 
         if ca.assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException(
+            raise CandidateAccessDeniedException(
                 "You do not have permission to delete this candidate."
             )
 

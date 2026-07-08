@@ -12,7 +12,17 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import AuthenticationException, ForbiddenException
+from src.core.exceptions import (
+    ForbiddenException,
+    InterviewConnectionFailedException,
+    InvalidInvitationException,
+    InvalidSessionTokenException,
+    ReconnectTimeoutException,
+    SessionBootstrapFailedException,
+    SessionClosedException,
+    SessionExpiredException,
+    SessionTokenExpiryMissingException,
+)
 from src.data.clients.postgres_client import async_session_scope
 from src.data.repositories.candidate_session_repository import (
     CandidateSessionRepository,
@@ -96,7 +106,7 @@ class InterviewSessionService:
     ) -> CandidateSessionBootstrapResponse:
         expires_at = _aware(session.get("session_token_expires_at"))
         if expires_at is None:
-            raise RuntimeError("Session token expiry is missing")
+            raise SessionTokenExpiryMissingException()
         return CandidateSessionBootstrapResponse(
             session_token=str(session["session_token"]),
             session_token_expires_at=expires_at,
@@ -135,7 +145,7 @@ class InterviewSessionService:
                     candidate_assessment_id=None,
                     metadata={"reason": "invitation_not_found"},
                 )
-                rejection = AuthenticationException("Invalid interview invitation.")
+                rejection = InvalidInvitationException()
             else:
                 candidate_assessment_id = context["candidate_assessment_id"]
                 candidate_session = await repository.get_or_create_session_for_update(
@@ -162,9 +172,7 @@ class InterviewSessionService:
                             "candidate_assessment_status": candidate_status,
                         },
                     )
-                    rejection = ForbiddenException(
-                        "This interview session is already closed."
-                    )
+                    rejection = SessionClosedException()
                 else:
                     now = _utc_now()
                     expires_at = _aware(
@@ -184,9 +192,7 @@ class InterviewSessionService:
                                 "session_status": session_status,
                             },
                         )
-                        rejection = AuthenticationException(
-                            "This interview session has expired."
-                        )
+                        rejection = SessionExpiredException()
                     else:
                         invite_reissued = invite_consumed
                         if not existing_token:
@@ -244,7 +250,9 @@ class InterviewSessionService:
         if rejection is not None:
             raise rejection
         if response is None:
-            raise RuntimeError("Candidate session entry produced no result")
+            raise SessionBootstrapFailedException(
+                "Candidate session entry produced no result"
+            )
         return response
 
     async def get_session_context(
@@ -274,7 +282,9 @@ class InterviewSessionService:
         if rejection is not None:
             raise rejection
         if response is None:
-            raise RuntimeError("Candidate session context produced no result")
+            raise SessionBootstrapFailedException(
+                "Candidate session context produced no result"
+            )
         return response
 
     @staticmethod
@@ -282,17 +292,17 @@ class InterviewSessionService:
         context: dict[str, Any],
     ) -> Exception | None:
         if not context:
-            return AuthenticationException("Invalid interview session token.")
+            return InvalidSessionTokenException()
         expires_at = _aware(context.get("session_token_expires_at"))
         if expires_at is None or expires_at <= _utc_now():
-            return AuthenticationException("This interview session has expired.")
+            return SessionExpiredException()
         if (
             str(context.get("session_status") or "").upper()
             in TERMINAL_SESSION_STATUSES
             or str(context.get("candidate_assessment_status") or "").upper()
             in TERMINAL_CANDIDATE_STATUSES
         ):
-            return ForbiddenException("This interview session is already closed.")
+            return SessionClosedException()
         return None
 
     async def authorize_interview_connection(
@@ -350,9 +360,7 @@ class InterviewSessionService:
                                 ),
                             },
                         )
-                        rejection = ForbiddenException(
-                            "The five-minute reconnection window has expired."
-                        )
+                        rejection = ReconnectTimeoutException()
                     else:
                         restored = await repository.restore_disconnected_session(
                             session_id
@@ -416,7 +424,7 @@ class InterviewSessionService:
         if rejection is not None:
             raise rejection
         if response is None:
-            raise RuntimeError("Interview connection authorization failed")
+            raise InterviewConnectionFailedException()
         return response
 
     async def authorize_demo(

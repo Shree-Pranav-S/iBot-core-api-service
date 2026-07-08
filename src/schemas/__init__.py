@@ -27,8 +27,10 @@ from src.schemas.candidate import (
     BulkUploadResponse,
     CandidateAssessmentListItem,
     CSVRowResult,
+    EnrollCandidateResponse,
     RecruiterDecisionRequest,
     RecruiterDecisionResponse,
+    SingleCandidateResponse,
     TokenValidationResponse,
 )
 from src.schemas.common import (
@@ -68,8 +70,11 @@ __all__ = [
     "BulkUploadResponse",
     "CSVRowResult",
     "CandidateAssessmentListItem",
+    "CSVRowResult",
+    "EnrollCandidateResponse",
     "RecruiterDecisionRequest",
     "RecruiterDecisionResponse",
+    "SingleCandidateResponse",
     "TokenValidationResponse",
     # notification
     "RecruiterDashboardNotification",

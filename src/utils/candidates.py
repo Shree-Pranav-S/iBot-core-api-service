@@ -18,6 +18,10 @@ from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
 
 from src.config.settings import settings
+from src.core.exceptions import (
+    ResumeDownloadFailedException,
+    ResumeParseFailedException,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +137,7 @@ async def parse_resume_from_file(temp_file_path: str) -> dict:
 
     resume_text = await run_in_threadpool(extract_text)
     if not resume_text.strip():
-        raise ValueError("Parsed resume text is empty")
+        raise ResumeParseFailedException("Parsed resume text is empty")
 
     import json
 
@@ -198,7 +202,9 @@ async def download_resume(resume_url: str, temp_file_path: str) -> None:
         return url
 
     if not resume_url.startswith("http"):
-        raise ValueError(f"Invalid resume URL (not HTTP/HTTPS): {resume_url}")
+        raise ResumeDownloadFailedException(
+            f"Invalid resume URL (not HTTP/HTTPS): {resume_url}"
+        )
 
     download_url = get_direct_download_url(resume_url)
     async with httpx.AsyncClient(follow_redirects=True) as client:

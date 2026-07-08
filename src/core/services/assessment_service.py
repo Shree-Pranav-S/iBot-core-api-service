@@ -5,9 +5,9 @@ import uuid
 from datetime import datetime
 
 from src.core.exceptions import (
-    BadRequestException,
-    ForbiddenException,
-    NotFoundException,
+    AssessmentAccessDeniedException,
+    AssessmentNotFoundException,
+    AssessmentValidationException,
 )
 from src.data.models.postgres.assessment import Assessment
 from src.data.repositories.assessment_repository import AssessmentRepository
@@ -33,9 +33,9 @@ class AssessmentService:
         """Fetch an assessment and ensure the recruiter owns it."""
         assessment = await self._repository.get_by_id(assessment_id)
         if assessment is None:
-            raise NotFoundException("Assessment not found.")
+            raise AssessmentNotFoundException()
         if assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException("You do not have access to this assessment.")
+            raise AssessmentAccessDeniedException()
         return assessment
 
     async def get_recruiter_assessments(
@@ -81,7 +81,7 @@ class AssessmentService:
         The heavy processing is queued after the request transaction commits.
         """
         if not jd_file_bytes and not jd_text:
-            raise BadRequestException(
+            raise AssessmentValidationException(
                 "Either job description text or a PDF file must be provided."
             )
 

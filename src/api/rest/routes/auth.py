@@ -3,18 +3,10 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Header, Request, status
-from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.rest.dependencies import get_db_session
-from src.core.exceptions import (
-    AuthenticationException,
-    BadRequestException,
-    NotFoundException,
-)
+from src.api.rest.dependencies import get_auth_service, require_recruiter_id
+from src.core.exceptions import RecruiterNotFoundException
 from src.core.services.auth_service import AuthService
-from src.data.clients.redis_client import get_async_redis
-from src.data.repositories.auth_repository import AuthRepository
 from src.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -29,15 +21,6 @@ from src.schemas.auth import (
 from src.schemas.common import APIResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-def get_auth_service(
-    db: AsyncSession = Depends(get_db_session),
-    redis: Redis = Depends(get_async_redis),
-) -> AuthService:
-    """Build the auth service from request-scoped dependencies."""
-
-    return AuthService(AuthRepository(db), redis=redis)
 
 
 @router.post(
@@ -117,24 +100,13 @@ async def refresh_token(
     ),
 )
 async def get_current_recruiter(
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
     service: AuthService = Depends(get_auth_service),
 ) -> APIResponse[RecruiterResponse]:
     """Return the recruiter profile for the authenticated session."""
-
-    if not x_user_id:
-        raise AuthenticationException(
-            "Missing identity header — ensure request passes through the gateway."
-        )
-
-    try:
-        recruiter_id = uuid.UUID(x_user_id)
-    except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
-
     recruiter = await service.get_recruiter(recruiter_id)
     if recruiter is None:
-        raise NotFoundException("Recruiter not found.")
+        raise RecruiterNotFoundException()
 
     return APIResponse(
         message="Profile retrieved successfully.",

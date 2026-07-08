@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.exceptions import InvalidSessionAppendException
 from src.data.models.postgres.interview_session import InterviewSession
 
 
@@ -31,7 +32,9 @@ def _append_unique(
 ) -> tuple[list[dict[str, Any]], bool]:
     item_id = str(item.get(id_key) or "")
     if not item_id:
-        raise ValueError(f"{id_key} is required for idempotent append")
+        raise InvalidSessionAppendException(
+            f"{id_key} is required for idempotent append"
+        )
 
     current = list(items or [])
     if any(str(existing.get(id_key) or "") == item_id for existing in current):

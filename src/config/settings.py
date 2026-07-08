@@ -34,6 +34,19 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = Field(default="http://localhost:5173")
     TEMP_RESUME_DIR: str = Field(default="/tmp/ibot/resumes")
 
+    @property
+    def frontend_base_url(self) -> str:
+        """Return the public frontend origin used for email and interview links."""
+        return self.FRONTEND_URL.strip().rstrip("/")
+
+    def interview_invitation_url(self, invitation_token: object) -> str:
+        """Build the candidate interview entry URL for invitation emails."""
+        return f"{self.frontend_base_url}/interview?token={invitation_token}"
+
+    def evaluations_url(self) -> str:
+        """Build the recruiter evaluations deeplink used in report-ready emails."""
+        return f"{self.frontend_base_url}/evaluations"
+
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "core_api"

@@ -11,6 +11,7 @@ from typing import Any
 from groq import AsyncGroq
 
 from src.config.settings import settings
+from src.core.exceptions import AssessmentTaskFailedException
 from src.core.services.event_log_service import try_record_event_in_background
 from src.core.services.realtime_event_service import publish_recruiter_event
 from src.data.clients.celery_client import celery_app, run_async
@@ -75,7 +76,7 @@ async def _process_assessment(
             parsed_jd_text = jd_text
 
         if not parsed_jd_text.strip():
-            raise ValueError("Job description content is empty.")
+            raise AssessmentTaskFailedException("Job description content is empty.")
 
         # Run one LLM call that generates both JD analysis and the executable plan.
         assert assessment_info is not None

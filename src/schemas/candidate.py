@@ -48,6 +48,16 @@ class SingleCandidateResponse(AppBaseModel):
     status: str
 
 
+class EnrollCandidateResponse(AppBaseModel):
+    """Response for enrolling an existing candidate into an assessment."""
+
+    candidate_assessment_id: uuid.UUID
+    candidate_id: uuid.UUID
+    full_name: str
+    email: str
+    status: str
+
+
 class ExistingCandidateListItem(AppBaseModel):
     """A unique candidate record (not per-assessment) for use in enrollment dropdowns."""
 

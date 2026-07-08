@@ -1,9 +1,13 @@
 """Business logic for recruiter-facing evaluation display operations."""
 
 import uuid
-from typing import Any
 
-from src.core.exceptions import ForbiddenException, NotFoundException
+from src.core.exceptions import (
+    AssessmentNotFoundException,
+    CandidateRegistrationNotFoundException,
+    EvaluationAccessDeniedException,
+    EvaluationNotFoundException,
+)
 from src.data.models.postgres.assessment import Assessment
 from src.data.models.postgres.candidate import Candidate
 from src.data.models.postgres.candidate_assessment import CandidateAssessment
@@ -25,6 +29,10 @@ from src.schemas.evaluation import (
     RecruiterEvaluationListItem,
 )
 from src.utils.candidates import generate_rejection_feedback
+from src.utils.evaluation import (
+    _build_transcript_turn,
+    _validated_violation_count,
+)
 
 
 class EvaluationService:
@@ -65,7 +73,7 @@ class EvaluationService:
         )
         evaluation = await self._evaluation_repo.get_by_candidate_assessment_id(ca_id)
         if evaluation is None:
-            raise NotFoundException("Evaluation not found for this candidate.")
+            raise EvaluationNotFoundException()
 
         response = InterviewEvaluationResponse.model_validate(
             evaluation,
@@ -123,7 +131,7 @@ class EvaluationService:
         )
         evaluation = await self._evaluation_repo.get_by_candidate_assessment_id(ca_id)
         if evaluation is None:
-            raise NotFoundException("Evaluation not found for this candidate.")
+            raise EvaluationNotFoundException()
 
         feedback = await generate_rejection_feedback(
             candidate_name=ca.candidate.full_name if ca.candidate else "Candidate",
@@ -145,11 +153,13 @@ class EvaluationService:
     ) -> CandidateAssessment:
         ca = await self._ca_repo.get_by_id(ca_id)
         if ca is None:
-            raise NotFoundException("Candidate registration not found.")
+            raise CandidateRegistrationNotFoundException()
         if ca.assessment is None:
-            raise NotFoundException("Assessment not found for this candidate.")
+            raise AssessmentNotFoundException()
         if ca.assessment.recruiter_id != recruiter_id:
-            raise ForbiddenException(f"You do not have access to this {resource_name}.")
+            raise EvaluationAccessDeniedException(
+                f"You do not have access to this {resource_name}."
+            )
         return ca
 
     def _build_list_item(
@@ -187,85 +197,3 @@ class EvaluationService:
             ),
             skill_scores=evaluation.skill_scores,
         )
-
-
-def _validated_violation_count(violation_summary: object) -> int:
-    if not isinstance(violation_summary, dict):
-        return 0
-    raw_count = violation_summary.get("validated_violation_count", 0) or 0
-    try:
-        return int(raw_count)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _build_transcript_turn(
-    raw_turn: dict[str, Any],
-    fallback_turn_number: int,
-) -> TranscriptTurn:
-    metadata = raw_turn.get("metadata")
-    parsed_metadata: dict[str, Any] = (
-        dict(metadata) if isinstance(metadata, dict) else {}
-    )
-    return TranscriptTurn(
-        turn_number=_safe_int(raw_turn.get("turn_number"), fallback_turn_number),
-        turn_id=_first_string(raw_turn.get("turn_id")),
-        speaker=str(raw_turn.get("speaker", "unknown")),
-        text=str(raw_turn.get("text", "")),
-        tone=raw_turn.get("tone"),
-        timestamp=_first_string(raw_turn.get("timestamp")),
-        elapsed_secs=_safe_elapsed_secs(parsed_metadata.get("elapsed_secs")),
-        question_id=_first_string(
-            raw_turn.get("question_id"),
-            parsed_metadata.get("question_id"),
-        ),
-        section=_first_string(
-            raw_turn.get("current_section"),
-            raw_turn.get("section"),
-            parsed_metadata.get("current_section"),
-            parsed_metadata.get("section"),
-        ),
-        skill=_first_string(
-            raw_turn.get("current_skill"),
-            raw_turn.get("skill"),
-            parsed_metadata.get("current_skill"),
-            parsed_metadata.get("skill"),
-        ),
-        difficulty=_first_string(
-            raw_turn.get("question_difficulty"),
-            raw_turn.get("difficulty"),
-            parsed_metadata.get("question_difficulty"),
-            parsed_metadata.get("difficulty"),
-        ),
-        question_type=_first_string(
-            raw_turn.get("question_type"),
-            parsed_metadata.get("question_type"),
-        ),
-        response_type=_first_string(
-            raw_turn.get("response_type"),
-            parsed_metadata.get("response_type"),
-        ),
-    )
-
-
-def _first_string(*values: object) -> str | None:
-    for value in values:
-        if value:
-            return str(value)
-    return None
-
-
-def _safe_int(value: object, fallback: int) -> int:
-    try:
-        return int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _safe_elapsed_secs(value: object) -> int | None:
-    if value is None:
-        return None
-    try:
-        return max(0, int(value))  # type: ignore[call-overload]
-    except (TypeError, ValueError):
-        return None
