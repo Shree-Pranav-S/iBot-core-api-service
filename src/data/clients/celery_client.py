@@ -1,6 +1,7 @@
 """Celery client configuration for core API background workloads."""
 
 import asyncio
+import socket
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
@@ -8,6 +9,29 @@ from celery import Celery
 from kombu import Queue
 
 from src.config.settings import settings
+
+
+def _redis_broker_transport_options() -> dict[str, Any]:
+    """Keep broker connections alive across Cloud Run / Memorystore idle drops."""
+    keepalive_options: dict[int, int] = {}
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        keepalive_options[socket.TCP_KEEPIDLE] = 60
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        keepalive_options[socket.TCP_KEEPINTVL] = 10
+    if hasattr(socket, "TCP_KEEPCNT"):
+        keepalive_options[socket.TCP_KEEPCNT] = 3
+
+    return {
+        "visibility_timeout": 3600,
+        "socket_keepalive": True,
+        "socket_keepalive_options": keepalive_options,
+        "health_check_interval": settings.REDIS_HEALTHCHECK_INTERVAL,
+        "retry_on_timeout": True,
+        "socket_connect_timeout": settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+        # Blocking BRPOP needs a generous read timeout on long-lived workers.
+        "socket_timeout": max(settings.REDIS_SOCKET_TIMEOUT, 30),
+    }
+
 
 T = TypeVar("T")
 _celery_loop: asyncio.AbstractEventLoop | None = None
@@ -34,7 +58,10 @@ celery_app = Celery(
 
 celery_app.conf.update(
     accept_content=["json"],
+    broker_connection_retry=True,
     broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=None,
+    broker_transport_options=_redis_broker_transport_options(),
     enable_utc=True,
     result_serializer="json",
     task_acks_late=True,

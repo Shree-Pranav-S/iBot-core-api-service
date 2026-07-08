@@ -42,7 +42,7 @@ from src.utils.candidates import (
 logger = logging.getLogger(__name__)
 
 # Required CSV column headers (case-insensitive)
-REQUIRED_COLUMNS = {"name", "email", "resume", "assessment_id"}
+REQUIRED_COLUMNS = {"name", "email", "resume"}
 
 COMPLETED_ENROLLMENT_STATUSES = frozenset({"COMPLETED", "EVALUATED"})
 
@@ -116,16 +116,24 @@ class CandidateService:
     async def bulk_upload_from_csv(
         self,
         recruiter_id: uuid.UUID,
+        assessment_id: uuid.UUID,
         file_bytes: bytes,
         filename: str,
     ) -> BulkUploadResponse:
         """
-        Parse the uploaded CSV, match each candidate's assessment_id to an assessment,
-        create candidate and candidate-assessment records, and dispatch invitation emails.
+        Parse the uploaded CSV and enroll each row into the selected assessment.
 
-        The CSV must contain columns: name, email, resume, assessment_id.
-        The assessment_id must be a valid UUID matching an assessment owned by this recruiter.
+        The CSV must contain columns: name, email, resume.
+        The target assessment is chosen in the UI and passed separately.
         """
+        matched_assessment = await self._assessment_repo.get_by_id(assessment_id)
+        if matched_assessment is None:
+            raise NotFoundException("Assessment not found.")
+        if matched_assessment.recruiter_id != recruiter_id:
+            raise ForbiddenException("You do not have access to this assessment.")
+
+        assessment_id_str = str(assessment_id)
+
         # Parse CSV
         try:
             text = file_bytes.decode("utf-8-sig")  # handles BOM
@@ -141,16 +149,12 @@ class CandidateService:
         if missing:
             raise BadRequestException(
                 f"CSV is missing required columns: {', '.join(sorted(missing))}. "
-                f"Expected: name, email, resume, assessment_id."
+                f"Expected: name, email, resume."
             )
 
         rows = list(reader)
         if not rows:
             raise BadRequestException("CSV file contains no data rows.")
-
-        # Load all assessments owned by this recruiter and build a UUID lookup map
-        all_assessments = await self._assessment_repo.get_all_by_recruiter(recruiter_id)
-        assessment_map: dict[str, Assessment] = {str(a.id): a for a in all_assessments}
 
         total_rows = len(rows)
         upload_id = uuid.uuid4()
@@ -171,11 +175,10 @@ class CandidateService:
 
             email = row.get("email", "")
             name = row.get("name", "")
-            resume_placeholder = row.get("resume", "placeholder_resume.pdf")
-            assessment_id_str = row.get("assessment_id", "")
+            resume_placeholder = row.get("resume", "")
 
-            if not email or not name or not assessment_id_str:
-                reason = "Missing required fields: name, email, or assessment_id."
+            if not email or not name or not resume_placeholder:
+                reason = "Missing required fields: name, email, or resume."
                 result = CSVRowResult(
                     row=row_idx,
                     email=email or "(empty)",
@@ -195,40 +198,6 @@ class CandidateService:
                             "email": result.email,
                             "assessment_id": assessment_id_str,
                             "reason_code": "MISSING_REQUIRED_FIELDS",
-                        },
-                        error_message=reason,
-                    )
-                )
-                failed_rows += 1
-                continue
-
-            # Assessment ID matching
-            matched_assessment = assessment_map.get(assessment_id_str.strip())
-            if matched_assessment is None:
-                reason = (
-                    f"No assessment found with ID '{assessment_id_str}'. "
-                    "Ensure the assessment_id is valid and belongs to your account."
-                )
-                row_results.append(
-                    CSVRowResult(
-                        row=row_idx,
-                        email=email,
-                        status="failed",
-                        reason=reason,
-                    )
-                )
-                failure_events.append(
-                    EventLogCreate(
-                        event_name=EventName.CSV_ROW_FAILED,
-                        source_service=EventSource.CORE_API,
-                        correlation_id=str(upload_id),
-                        recruiter_id=recruiter_id,
-                        metadata={
-                            "filename": filename,
-                            "row_number": row_idx,
-                            "email": email,
-                            "assessment_id": assessment_id_str,
-                            "reason_code": "ASSESSMENT_NOT_FOUND",
                         },
                         error_message=reason,
                     )

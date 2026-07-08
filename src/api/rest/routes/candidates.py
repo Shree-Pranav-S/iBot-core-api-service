@@ -56,17 +56,18 @@ def get_candidate_service(
     status_code=status.HTTP_201_CREATED,
     summary="Bulk upload candidates from CSV",
     description=(
-        "Upload a CSV file containing candidate records. "
-        "Each row must have columns: name, email, resume, assessment_id. "
-        "Candidates are matched to assessments by assessment_id (UUID) "
-        "and receive an invitation email with their unique interview link."
+        "Upload a CSV file containing candidate records for a single assessment. "
+        "The CSV must have columns: name, email, resume. "
+        "Select the target assessment in the form; candidates receive "
+        "an invitation email with their unique interview link."
     ),
 )
 async def bulk_upload_candidates(
     csv_file: UploadFile = File(
         ...,
-        description="CSV file with columns: name, email, resume, assessment_id",
+        description="CSV file with columns: name, email, resume",
     ),
+    assessment_id: str = Form(..., description="UUID of the target assessment"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     service: CandidateService = Depends(get_candidate_service),
 ) -> APIResponse[BulkUploadResponse]:
@@ -78,8 +79,9 @@ async def bulk_upload_candidates(
 
     try:
         recruiter_id = uuid.UUID(x_user_id)
+        parsed_assessment_id = uuid.UUID(assessment_id)
     except ValueError:
-        raise BadRequestException("Invalid X-User-Id header format.")
+        raise BadRequestException("Invalid X-User-Id or assessment_id format.")
 
     if not csv_file.filename or not csv_file.filename.lower().endswith(".csv"):
         raise BadRequestException("Uploaded file must be a CSV (.csv extension).")
@@ -90,6 +92,7 @@ async def bulk_upload_candidates(
 
     result = await service.bulk_upload_from_csv(
         recruiter_id=recruiter_id,
+        assessment_id=parsed_assessment_id,
         file_bytes=file_bytes,
         filename=csv_file.filename,
     )
