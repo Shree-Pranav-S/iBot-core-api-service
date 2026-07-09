@@ -4,84 +4,36 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Sequence
+from typing import Any
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from src.config.settings import settings
 from src.core.exceptions import JdParseFailedException, LlmAnalysisFailedException
 from src.schemas.assessment import (
-    BehaviouralCulturalSection,
     FocusAreaOverride,
     JDAnalysisAndInterviewPlan,
-    SelfIntroSection,
-    SkillPriority,
-    TechnicalInterviewSection,
 )
 
 logger = logging.getLogger(__name__)
 
-# Groq llama-3.3-70b-versatile enforces a request token budget. Truncate only
-# when the JD exceeds this limit so typical job descriptions are unchanged.
 _MAX_JD_CHARS_FOR_ANALYSIS = 8000
 
 
-def _normalize_skill_key(value: str) -> str:
-    return " ".join(value.strip().lower().split())
-
-
-def _skill_alias_tokens(value: str) -> set[str]:
-    normalized = _normalize_skill_key(value)
-    if not normalized:
-        return set()
-    tokens = set(re.findall(r"[a-z0-9\+#\.]+", normalized))
-    tokens.add(normalized)
-    # Common shorthand/long-form normalizations
-    if normalized in {"sql", "structured query language"}:
-        tokens.update({"sql", "structured query language"})
-    return {token for token in tokens if token}
-
-
-def _resolve_override_for_skill(
-    skill_name: str, overrides: list[FocusAreaOverride]
-) -> float | None:
-    """Return the override weight for a skill using exact + token matching."""
-    skill_key = _normalize_skill_key(skill_name)
-    skill_tokens = _skill_alias_tokens(skill_name)
-    if not skill_tokens and not skill_key:
-        return None
-
-    best_value: float | None = None
-    best_score = -1
-    for override in overrides:
-        override_key = _normalize_skill_key(override.skill)
-        override_tokens = _skill_alias_tokens(override.skill)
-        if not override_key and not override_tokens:
-            continue
-
-        score = 0
-        if skill_key and override_key and skill_key == override_key:
-            score = 3
-        elif (
-            skill_tokens
-            and override_tokens
-            and skill_tokens.intersection(override_tokens)
-        ):
-            score = 2
-        elif (
-            skill_key
-            and override_key
-            and (skill_key in override_key or override_key in skill_key)
-        ):
-            score = 1
-
-        if score > best_score:
-            best_score = score
-            best_value = override.weight_override
-
-    return best_value if best_score > 0 else None
+def _structured_response_format(
+    response_model: type[BaseModel],
+) -> dict[str, Any]:
+    """Build Groq strict Structured Outputs configuration from a Pydantic model."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": response_model.__name__.lower(),
+            "strict": True,
+            "schema": response_model.model_json_schema(),
+        },
+    }
 
 
 def _min_minutes_per_skill(total_mins: int, technical_minutes: float) -> float:
@@ -99,305 +51,9 @@ def _min_minutes_per_skill(total_mins: int, technical_minutes: float) -> float:
     return 3.0
 
 
-def _target_skill_count(total_mins: int, technical_minutes: float) -> int:
-    """Choose how many technical skills fit the interview length well."""
-    if technical_minutes <= 0:
-        return 0
-
-    min_per_skill = _min_minutes_per_skill(total_mins, technical_minutes)
-    hard_cap_by_time = max(1, int(technical_minutes // min_per_skill))
-
-    # Keep plans focused: short interviews probe a few core skills deeply.
-    duration_soft_caps = {
-        2: 1,
-        3: 1,
-        4: 2,
-        5: 2,
-        8: 2,
-        10: 3,
-        15: 3,
-        20: 4,
-        30: 5,
-        45: 6,
-        60: 7,
-    }
-    soft_cap = 7
-    for threshold in sorted(duration_soft_caps):
-        if total_mins <= threshold:
-            soft_cap = duration_soft_caps[threshold]
-            break
-
-    return max(1, min(hard_cap_by_time, soft_cap))
-
-
-def _select_skills_for_plan(
-    scored_skills: list[tuple[str, float, float]],
-    *,
-    total_mins: int,
-    technical_minutes: float,
-) -> list[tuple[str, float, float]]:
-    """Pick a high-signal skill set ranked by effective priority."""
-    if not scored_skills or technical_minutes <= 0:
-        return []
-
-    ranked = sorted(
-        scored_skills,
-        key=lambda item: (item[2], item[1]),
-        reverse=True,
-    )
-    target_count = _target_skill_count(total_mins, technical_minutes)
-    selected = ranked[:target_count]
-
-    # Prefer core skills; drop weak nice-to-haves once stronger coverage exists.
-    if len(selected) > 1:
-        strongest = selected[0][2]
-        # Supporting skills below this threshold rarely warrant interview depth
-        # when higher-priority skills already fill the plan.
-        supporting_floor = 6.0 if total_mins <= 15 else 4.5
-        refined: list[tuple[str, float, float]] = []
-        for skill_name, priority, effective in selected:
-            # On short interviews, also drop skills that are far below the top score.
-            relative_gap = total_mins <= 15 and effective < (strongest * 0.65)
-            is_weak_support = effective < supporting_floor or relative_gap
-            if refined and is_weak_support and len(refined) >= 2:
-                continue
-            refined.append((skill_name, priority, effective))
-            if len(refined) >= target_count:
-                break
-        if refined:
-            selected = refined
-
-    return selected
-
-
-def _allocate_minutes_by_weight(
-    total_minutes: float,
-    effective_weights: Sequence[float],
-    *,
-    min_minutes_per_skill: float = 1.5,
-) -> list[float]:
-    """
-    Allocate minutes in 0.1 precision with a meaningful minimum per skill.
-
-    Extra time is distributed by effective weight so higher-priority skills
-    receive clearly more depth than supporting ones.
-    """
-    skill_count = len(effective_weights)
-    if skill_count == 0:
-        return []
-
-    total_units = int(round(total_minutes * 10))
-    min_units_per_skill = max(5, int(round(min_minutes_per_skill * 10)))
-    base_units = min_units_per_skill * skill_count
-
-    # If mins are too tight for the chosen skill set, reduce the floor uniformly.
-    if total_units < base_units:
-        even = total_units // skill_count
-        remainder = total_units % skill_count
-        return [
-            (even + (1 if idx < remainder else 0)) / 10.0 for idx in range(skill_count)
-        ]
-
-    extra_units = total_units - base_units
-    # Square-ish weights so the top skills pull more of the remaining budget.
-    boosted_weights = [max(weight, 0.0) ** 2.0 for weight in effective_weights]
-    total_weight = sum(boosted_weights)
-    if total_weight <= 0:
-        distributed = [extra_units // skill_count] * skill_count
-        for index in range(extra_units % skill_count):
-            distributed[index] += 1
-    else:
-        scaled = [extra_units * weight / total_weight for weight in boosted_weights]
-        distributed = [int(value) for value in scaled]
-        remainder = extra_units - sum(distributed)
-        if remainder > 0:
-            order = sorted(
-                range(skill_count),
-                key=lambda idx: (
-                    scaled[idx] - distributed[idx],
-                    boosted_weights[idx],
-                ),
-                reverse=True,
-            )
-            for idx in order[:remainder]:
-                distributed[idx] += 1
-
-    return [(min_units_per_skill + extra) / 10.0 for extra in distributed]
-
-
-def _default_expected_signals(skill_name: str) -> list[str]:
-    return [
-        f"Understanding of {skill_name} fundamentals",
-        f"Ability to apply {skill_name} in role-relevant scenarios",
-    ]
-
-
-def _default_behavioural_signals(
-    combined: JDAnalysisAndInterviewPlan,
-) -> list[str]:
-    signals = combined.jd_analysis.behavioural_signals[:4]
-    if signals:
-        return signals
-    return [
-        "Ownership and accountability",
-        "Problem-solving mindset",
-        "Alignment with team culture and working norms",
-    ]
-
-
-def _normalize_interview_plan_timing(
-    combined: JDAnalysisAndInterviewPlan, focus_areas: list[FocusAreaOverride]
-) -> None:
-    """Normalize section order and timing after LLM generation.
-
-    The LLM is allowed to choose content, but persisted timing must be
-    deterministic. Behavioural/cultural time is capped at 10 percent of the
-    total interview duration, so a 5-minute interview receives at most 0.5 min.
-    """
-    total_mins = int(combined.interview_plan.total_mins)
-    total_units = total_mins * 10
-    self_intro_units = min(total_mins, 10)
-    behavioural_units = total_mins
-    technical_units = max(total_units - self_intro_units - behavioural_units, 0)
-
-    existing_self_intro = next(
-        (
-            section
-            for section in combined.interview_plan.sections
-            if section.section_name == "self_intro"
-        ),
-        None,
-    )
-    existing_behavioural = next(
-        (
-            section
-            for section in combined.interview_plan.sections
-            if section.section_name == "behavioural_cultural"
-        ),
-        None,
-    )
-    existing_technical_sections = [
-        section
-        for section in combined.interview_plan.sections
-        if section.skill and section.section_name != "behavioural_cultural"
-    ]
-    existing_technical_by_key = {
-        _normalize_skill_key(section.skill): section
-        for section in existing_technical_sections
-    }
-
-    jd_skills = combined.jd_analysis.skills
-    scored_skills: list[tuple[str, float, float]] = []
-    for skill in jd_skills:
-        override = _resolve_override_for_skill(skill.skill, focus_areas)
-        effective = override if override is not None else skill.priority_score
-        if override is not None:
-            # Manual override must win over LLM-provided priority.
-            skill.priority_score = override
-        scored_skills.append((skill.skill, skill.priority_score, effective))
-
-    # Ensure manually overridden skills are represented even if the LLM missed them.
-    existing_skill_keys = {_normalize_skill_key(skill.skill) for skill in jd_skills}
-    for fa_override in focus_areas:
-        override_key = _normalize_skill_key(fa_override.skill)
-        if override_key and override_key not in existing_skill_keys:
-            combined.jd_analysis.skills.append(
-                SkillPriority(
-                    skill=fa_override.skill.strip(),
-                    priority_score=fa_override.weight_override,
-                    reasoning="Manually prioritized via recruiter focus-area override.",
-                )
-            )
-            scored_skills.append(
-                (
-                    fa_override.skill.strip(),
-                    fa_override.weight_override,
-                    fa_override.weight_override,
-                )
-            )
-            existing_skill_keys.add(override_key)
-
-    if not scored_skills and existing_technical_sections:
-        for section in existing_technical_sections:
-            skill_name = str(section.skill).strip()
-            if not skill_name:
-                continue
-            scored_skills.append((skill_name, 1.0, 1.0))
-            combined.jd_analysis.skills.append(
-                SkillPriority(
-                    skill=skill_name,
-                    priority_score=1.0,
-                    reasoning="Recovered from the generated interview plan.",
-                )
-            )
-
-    if not scored_skills and technical_units >= 5:
-        fallback_skill = "Role-specific knowledge"
-        scored_skills.append((fallback_skill, 1.0, 1.0))
-        combined.jd_analysis.skills.append(
-            SkillPriority(
-                skill=fallback_skill,
-                priority_score=1.0,
-                reasoning="Fallback skill added to keep the interview plan executable.",
-            )
-        )
-
-    technical_minutes = technical_units / 10.0
-    selected = _select_skills_for_plan(
-        scored_skills,
-        total_mins=total_mins,
-        technical_minutes=technical_minutes,
-    )
-    min_per_skill = _min_minutes_per_skill(total_mins, technical_minutes)
-    weights = [item[2] for item in selected]
-    allocations = _allocate_minutes_by_weight(
-        technical_minutes,
-        weights,
-        min_minutes_per_skill=min_per_skill,
-    )
-
-    rebuilt_sections = []
-    if existing_self_intro is None:
-        existing_self_intro = SelfIntroSection(allocated_mins=self_intro_units / 10.0)
-    existing_self_intro.skill = None
-    existing_self_intro.allocated_mins = self_intro_units / 10.0
-    rebuilt_sections.append(existing_self_intro)
-
-    for (skill_name, _priority, _effective), allocated in zip(
-        selected, allocations, strict=False
-    ):
-        key = _normalize_skill_key(skill_name)
-        existing_section = existing_technical_by_key.get(key)
-        if existing_section is None:
-            new_section = TechnicalInterviewSection(
-                section_name=skill_name,
-                skill=skill_name,
-                allocated_mins=allocated,
-                expected_signals=_default_expected_signals(skill_name),
-            )
-            rebuilt_sections.append(new_section)
-        else:
-            existing_section.section_name = skill_name
-            existing_section.skill = skill_name
-            existing_section.allocated_mins = allocated
-            if not existing_section.expected_signals:
-                existing_section.expected_signals = _default_expected_signals(
-                    skill_name
-                )
-            rebuilt_sections.append(existing_section)
-
-    if existing_behavioural is None:
-        existing_behavioural = BehaviouralCulturalSection(
-            allocated_mins=behavioural_units / 10.0,
-            expected_signals=_default_behavioural_signals(combined),
-        )
-    existing_behavioural.skill = None
-    existing_behavioural.allocated_mins = behavioural_units / 10.0
-    if not existing_behavioural.expected_signals:
-        existing_behavioural.expected_signals = _default_behavioural_signals(combined)
-    rebuilt_sections.append(existing_behavioural)  # type: ignore[arg-type]
-
-    combined.interview_plan.sections = rebuilt_sections  # type: ignore[assignment]
+def _estimated_technical_minutes(total_mins: int) -> float:
+    """Approximate technical time after intro and behavioural sections."""
+    return max(total_mins * 0.8, 0.0)
 
 
 def _truncate_jd_text(jd_text: str, max_chars: int = _MAX_JD_CHARS_FOR_ANALYSIS) -> str:
@@ -413,12 +69,29 @@ def _truncate_jd_text(jd_text: str, max_chars: int = _MAX_JD_CHARS_FOR_ANALYSIS)
     return source[:max_chars].rstrip()
 
 
+def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
+    if not focus_areas:
+        return "[]"
+    return json.dumps([item.model_dump() for item in focus_areas], ensure_ascii=True)
+
+
+def _finalize_analysis(
+    combined: JDAnalysisAndInterviewPlan,
+    duration_mins: int,
+) -> JDAnalysisAndInterviewPlan:
+    """Apply request-level metadata without rewriting LLM-generated plan content."""
+    combined.interview_plan.total_mins = duration_mins
+    combined.interview_plan.inferred_difficulty = (
+        combined.jd_analysis.inferred_difficulty
+    )
+    return combined
+
+
 async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
     """Parse PDF job description using PyMuPDF in a background thread."""
     import fitz
 
     def extract_text() -> str:
-        """Extract text from uploaded PDF job description bytes."""
         text = ""
         with fitz.open(stream=file_bytes, filetype="pdf") as doc:
             for page in doc:
@@ -457,11 +130,7 @@ async def format_jd_to_markdown(
     raw_jd_text: str,
     groq_client: AsyncGroq,
 ) -> str:
-    """Reformat a raw JD into clean Markdown; fall back to the raw text on failure.
-
-    This never raises: formatting is a best-effort enhancement for display, and a
-    failure here must not block assessment processing.
-    """
+    """Reformat a raw JD into clean Markdown; fall back to the raw text on failure."""
     source = (raw_jd_text or "").strip()
     if not source:
         return source
@@ -494,16 +163,7 @@ async def format_jd_to_markdown(
 
     formatted = re.sub(r"^```(?:markdown)?\s*\n?", "", formatted)
     formatted = re.sub(r"\n?```\s*$", "", formatted)
-    formatted = formatted.strip()
-
-    return formatted or source
-
-
-def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
-    if not focus_areas:
-        return "[]"
-
-    return json.dumps([item.model_dump() for item in focus_areas], ensure_ascii=True)
+    return formatted.strip() or source
 
 
 def _combined_analysis_system_prompt() -> str:
@@ -953,6 +613,26 @@ def _combined_analysis_messages(
     return messages
 
 
+def _analysis_user_prompt(
+    *,
+    jd_text: str,
+    duration_mins: int,
+    focus_areas: list[FocusAreaOverride] | None,
+) -> str:
+    technical_minutes = _estimated_technical_minutes(duration_mins)
+    min_per_skill = _min_minutes_per_skill(duration_mins, technical_minutes)
+    return (
+        f"Interview duration: {duration_mins} minutes\n"
+        f"Estimated technical minutes available: {technical_minutes:.1f}\n"
+        f"Minimum minutes per technical skill section: {min_per_skill}\n"
+        f"Focus area overrides as JSON: {_focus_areas_for_prompt(focus_areas)}\n\n"
+        "Analyze this Job Description and generate the combined output.\n"
+        "The interview_plan must be complete, time-balanced, and executable for this "
+        f"exact {duration_mins}-minute duration.\n\n"
+        f"{jd_text}"
+    )
+
+
 async def run_jd_analysis_and_interview_plan(
     jd_text: str,
     duration_mins: int,
@@ -960,16 +640,11 @@ async def run_jd_analysis_and_interview_plan(
     groq_client: AsyncGroq,
 ) -> JDAnalysisAndInterviewPlan:
     """Call Groq once to produce both JD analysis and the executable interview plan."""
-
-    model = settings.GROQ_MODEL
     jd_for_prompt = _truncate_jd_text(jd_text)
-    base_user_prompt = (
-        f"Interview duration: {duration_mins} minutes\n"
-        f"Focus area overrides as JSON: {_focus_areas_for_prompt(focus_areas)}\n\n"
-        "Analyze this Job Description and generate the combined output.\n"
-        "The interview_plan must be complete, time-balanced, and executable for this "
-        f"exact {duration_mins}-minute duration.\n\n"
-        f"{jd_for_prompt}"
+    base_user_prompt = _analysis_user_prompt(
+        jd_text=jd_for_prompt,
+        duration_mins=duration_mins,
+        focus_areas=focus_areas,
     )
 
     last_exc: Exception | None = None
@@ -978,23 +653,18 @@ async def run_jd_analysis_and_interview_plan(
     for attempt in range(max_attempts):
         try:
             completion = await groq_client.chat.completions.create(
-                model=model,
+                model=settings.GROQ_MODEL,
                 messages=_combined_analysis_messages(
                     user_prompt=base_user_prompt,
                     repair_note=repair_note,
                 ),
-                response_format={"type": "json_object"},
+                response_format=_structured_response_format(JDAnalysisAndInterviewPlan),
                 temperature=0.1,
             )
             raw_content = completion.choices[0].message.content or ""
             parsed_json = json.loads(raw_content)
             combined = JDAnalysisAndInterviewPlan.model_validate(parsed_json)
-            combined.interview_plan.total_mins = duration_mins
-            combined.interview_plan.inferred_difficulty = (
-                combined.jd_analysis.inferred_difficulty
-            )
-            _normalize_interview_plan_timing(combined, focus_areas or [])
-            return combined
+            return _finalize_analysis(combined, duration_mins)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_exc = exc
             if attempt < max_attempts - 1:
@@ -1019,13 +689,10 @@ async def run_jd_analysis_and_interview_plan(
                 and len(jd_for_prompt) > 4000
             ):
                 jd_for_prompt = _truncate_jd_text(jd_text, 4000)
-                base_user_prompt = (
-                    f"Interview duration: {duration_mins} minutes\n"
-                    f"Focus area overrides as JSON: {_focus_areas_for_prompt(focus_areas)}\n\n"
-                    "Analyze this Job Description and generate the combined output.\n"
-                    "The interview_plan must be complete, time-balanced, and executable for this "
-                    f"exact {duration_mins}-minute duration.\n\n"
-                    f"{jd_for_prompt}"
+                base_user_prompt = _analysis_user_prompt(
+                    jd_text=jd_for_prompt,
+                    duration_mins=duration_mins,
+                    focus_areas=focus_areas,
                 )
                 repair_note = None
                 logger.warning(
