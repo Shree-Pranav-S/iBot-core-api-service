@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = Field(default="")
     FALLBACK_GROQ_API_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
-    LLAMA_CLOUD_API_KEY: str = Field(default="")
 
     BREVO_API_KEY: str = Field(default="")
     BREVO_SENDER_EMAIL: str = Field(default="shreepranav067@gmail.com")
@@ -59,9 +58,6 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str | None = None
     CELERY_BROKER_URL: str | None = None
     CELERY_RESULT_BACKEND: str | None = None
-
-    PGADMIN_DEFAULT_EMAIL: str = "admin@local.test"
-    PGADMIN_DEFAULT_PASSWORD: str = "admin"
 
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 10

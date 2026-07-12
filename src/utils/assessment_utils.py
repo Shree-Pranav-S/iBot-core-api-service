@@ -4,10 +4,13 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
+from groq.types.chat import ChatCompletionMessageParam
+from groq.types.chat.completion_create_params import (
+    ResponseFormatResponseFormatJsonSchema,
+)
 from pydantic import BaseModel, ValidationError
 
 from src.config.settings import settings
@@ -24,7 +27,7 @@ _MAX_JD_CHARS_FOR_ANALYSIS = 8000
 
 def _structured_response_format(
     response_model: type[BaseModel],
-) -> dict[str, Any]:
+) -> ResponseFormatResponseFormatJsonSchema:
     """Build Groq strict Structured Outputs configuration from a Pydantic model."""
     return {
         "type": "json_schema",
@@ -587,7 +590,7 @@ def _combined_analysis_messages(
     *,
     user_prompt: str,
     repair_note: str | None = None,
-) -> list[dict[str, str]]:
+) -> list[ChatCompletionMessageParam]:
     """Build chat messages for JD analysis, optionally including a repair hint."""
     schema_json = json.dumps(
         JDAnalysisAndInterviewPlan.model_json_schema(),
@@ -604,7 +607,7 @@ def _combined_analysis_messages(
         "- Match this JSON Schema:\n"
         f"{schema_json}"
     )
-    messages: list[dict[str, str]] = [
+    messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]

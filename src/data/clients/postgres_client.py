@@ -42,15 +42,17 @@ async def get_or_create_engine() -> AsyncEngine:
         logger.info("Creating async engine")
         _engine = create_async_engine(
             settings.DATABASE_URL,
-            pool_size=10,
-            max_overflow=10,
-            pool_timeout=10,
-            pool_recycle=3600,
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+            pool_timeout=settings.DB_POOL_TIMEOUT,
+            pool_recycle=settings.DB_POOL_RECYCLE,
             pool_pre_ping=True,
             connect_args={
-                "timeout": 180,
-                "command_timeout": 2400,
-                "server_settings": {"statement_timeout": "2400000"},
+                "timeout": settings.DB_CONNECT_TIMEOUT,
+                "command_timeout": settings.DB_COMMAND_TIMEOUT,
+                "server_settings": {
+                    "statement_timeout": str(settings.DB_STATEMENT_TIMEOUT_MS)
+                },
             },
         )
 

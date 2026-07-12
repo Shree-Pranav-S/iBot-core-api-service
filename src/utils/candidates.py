@@ -1,5 +1,6 @@
 """Utility helpers for candidate operations (parsing, email generation)."""
 
+import json
 import logging
 import re
 import uuid
@@ -138,8 +139,6 @@ async def parse_resume_from_file(temp_file_path: str) -> dict:
     resume_text = await run_in_threadpool(extract_text)
     if not resume_text.strip():
         raise ResumeParseFailedException("Parsed resume text is empty")
-
-    import json
 
     system_prompt = (
         "You are an expert resume parser and technical recruiter. "
