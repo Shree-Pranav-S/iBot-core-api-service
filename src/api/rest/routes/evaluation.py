@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from src.api.rest.dependencies import get_evaluation_service, require_recruiter_id
 from src.core.services.evaluation_service import EvaluationService
 from src.schemas.candidate import (
+    AIApprovalFeedbackResponse,
     AIRejectionFeedbackResponse,
     InterviewTranscriptResponse,
 )
@@ -99,6 +100,25 @@ async def create_rejection_feedback(
     )
 
 
+@router.post(
+    "/{ca_id}/approval-feedback",
+    response_model=APIResponse[AIApprovalFeedbackResponse],
+    summary="Generate approval message",
+    description="Draft an editable, candidate-facing approval message from evaluation evidence.",
+)
+async def create_approval_feedback(
+    ca_id: uuid.UUID,
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
+    service: EvaluationService = Depends(get_evaluation_service),
+) -> APIResponse[AIApprovalFeedbackResponse]:
+    """Generate a recruiter-editable approval message draft."""
+    feedback = await service.create_approval_feedback(ca_id, recruiter_id)
+    return APIResponse(
+        message="Approval message draft generated successfully.",
+        data=feedback,
+    )
+
+
 @candidate_compat_router.get(
     "/evaluations",
     response_model=APIResponse[list[RecruiterEvaluationListItem]],
@@ -148,3 +168,16 @@ async def create_rejection_feedback_legacy(
 ) -> APIResponse[AIRejectionFeedbackResponse]:
     """Legacy alias for POST /evaluations/{ca_id}/rejection-feedback."""
     return await create_rejection_feedback(ca_id, recruiter_id, service)
+
+
+@candidate_compat_router.post(
+    "/{ca_id}/approval-feedback",
+    response_model=APIResponse[AIApprovalFeedbackResponse],
+)
+async def create_approval_feedback_legacy(
+    ca_id: uuid.UUID,
+    recruiter_id: uuid.UUID = Depends(require_recruiter_id),
+    service: EvaluationService = Depends(get_evaluation_service),
+) -> APIResponse[AIApprovalFeedbackResponse]:
+    """Legacy alias for POST /evaluations/{ca_id}/approval-feedback."""
+    return await create_approval_feedback(ca_id, recruiter_id, service)

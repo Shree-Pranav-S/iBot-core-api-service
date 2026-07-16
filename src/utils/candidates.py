@@ -6,7 +6,7 @@ import re
 import uuid
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import fitz
 import httpx
@@ -27,8 +27,9 @@ from src.core.exceptions import (
 logger = logging.getLogger(__name__)
 
 
-async def generate_rejection_feedback(
+async def generate_candidate_decision_feedback(
     *,
+    decision: Literal["APPROVED", "REJECTED"],
     candidate_name: str,
     role_name: str,
     assessment_title: str,
@@ -37,7 +38,7 @@ async def generate_rejection_feedback(
     strengths: list[str],
     concerns: list[str],
 ) -> str:
-    """Generate a concise, candidate-facing rejection feedback draft."""
+    """Generate concise, candidate-facing copy for a final hiring decision."""
     first_name = (
         candidate_name.strip().split()[0] if candidate_name.strip() else "there"
     )
@@ -51,28 +52,51 @@ async def generate_rejection_feedback(
         if concerns
         else "showing more specific evidence and depth in future interview responses"
     )
-    fallback = (
-        f"Thank you for the time and thought you put into the {role_name} interview, "
-        f"{first_name}. We appreciated {primary_strength.rstrip('.').lower()}. "
-        "After reviewing the interview evidence, we have decided not to move forward "
-        "with your application at this stage. For future opportunities, we encourage "
-        f"you to focus on {primary_concern.rstrip('.').lower()}. "
-        "We appreciate your interest and wish you the best in your search."
-    )
+    if decision == "APPROVED":
+        fallback = (
+            f"Thank you for the time and thought you put into the {role_name} interview, "
+            f"{first_name}. We were especially impressed by "
+            f"{primary_strength.rstrip('.').lower()}. We are pleased to move forward "
+            "with your application and look forward to continuing the conversation. "
+            "Our recruiting team will contact you with the next steps and any additional "
+            "details you need. We appreciate your interest in the opportunity and the "
+            "preparation you brought to the interview."
+        )
+        system_prompt = (
+            "You are an expert recruiting communications assistant. Write a warm, "
+            "specific, candidate-facing approval message using only the provided "
+            "interview evidence. Keep it between 70 and 120 words. Mention one or two "
+            "genuine strengths, confirm that the candidate is moving forward, and say "
+            "that the recruiting team will contact them with next steps. Do not mention "
+            "scores, AI, models, internal recommendations, policy, integrity flags, or "
+            "hidden evaluation criteria. Do not promise an offer, compensation, dates, "
+            "or a guaranteed outcome. Return only the message with no heading, bullets, "
+            "or quotation marks."
+        )
+    else:
+        fallback = (
+            f"Thank you for the time and thought you put into the {role_name} interview, "
+            f"{first_name}. We appreciated {primary_strength.rstrip('.').lower()}. "
+            "After reviewing the interview evidence, we have decided not to move forward "
+            "with your application at this stage. For future opportunities, we encourage "
+            f"you to focus on {primary_concern.rstrip('.').lower()}. "
+            "We appreciate your interest and wish you the best in your search."
+        )
+        system_prompt = (
+            "You are an expert recruiting communications assistant. Write a warm, "
+            "specific, candidate-facing rejection feedback paragraph using only the "
+            "provided interview evidence. Keep it between 70 and 120 words. Mention one "
+            "genuine strength and one or two constructive development areas. Do not mention "
+            "scores, AI, models, internal recommendations, policy, integrity flags, or hidden "
+            "evaluation criteria. Do not make promises or invite debate. Return only the "
+            "feedback paragraph with no heading, bullets, or quotation marks."
+        )
 
     if not settings.GROQ_API_KEY and not settings.FALLBACK_GROQ_API_KEY:
         return fallback[:2000]
 
-    system_prompt = (
-        "You are an expert recruiting communications assistant. Write a warm, "
-        "specific, candidate-facing rejection feedback paragraph using only the "
-        "provided interview evidence. Keep it between 70 and 120 words. Mention one "
-        "genuine strength and one or two constructive development areas. Do not mention "
-        "scores, AI, models, internal recommendations, policy, integrity flags, or hidden "
-        "evaluation criteria. Do not make promises or invite debate. Return only the "
-        "feedback paragraph with no heading, bullets, or quotation marks."
-    )
     user_prompt = (
+        f"Decision: {decision}\n"
         f"Candidate: {candidate_name}\n"
         f"Role: {role_name}\n"
         f"Assessment: {assessment_title}\n"
@@ -99,9 +123,19 @@ async def generate_rejection_feedback(
             if draft:
                 return draft[:2000]
         except Exception:
-            logger.exception("AI rejection feedback generation failed")
+            logger.exception("AI hiring decision feedback generation failed")
 
     return fallback[:2000]
+
+
+async def generate_rejection_feedback(**kwargs: Any) -> str:
+    """Generate a rejection draft while preserving the existing call surface."""
+    return await generate_candidate_decision_feedback(decision="REJECTED", **kwargs)
+
+
+async def generate_approval_feedback(**kwargs: Any) -> str:
+    """Generate an approval draft from persisted interview evidence."""
+    return await generate_candidate_decision_feedback(decision="APPROVED", **kwargs)
 
 
 def temporary_resume_path(candidate_assessment_id: uuid.UUID) -> Path:

@@ -147,7 +147,7 @@ class RecruiterDecisionRequest(AppBaseModel):
     feedback: str | None = Field(
         None,
         max_length=2000,
-        description="Optional manual feedback included in rejection email",
+        description="Optional recruiter message included in the hiring decision email",
     )
 
 
@@ -161,6 +161,12 @@ class RecruiterDecisionResponse(ORMBaseModel):
 
 class AIRejectionFeedbackResponse(AppBaseModel):
     """AI-assisted, recruiter-editable rejection feedback draft."""
+
+    feedback: str
+
+
+class AIApprovalFeedbackResponse(AppBaseModel):
+    """AI-assisted, recruiter-editable approval message draft."""
 
     feedback: str
 

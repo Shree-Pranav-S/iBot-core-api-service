@@ -20,6 +20,7 @@ from src.data.repositories.interview_session_repository import (
     InterviewSessionRepository,
 )
 from src.schemas.candidate import (
+    AIApprovalFeedbackResponse,
     AIRejectionFeedbackResponse,
     InterviewTranscriptResponse,
     TranscriptTurn,
@@ -28,7 +29,7 @@ from src.schemas.evaluation import (
     InterviewEvaluationResponse,
     RecruiterEvaluationListItem,
 )
-from src.utils.candidates import generate_rejection_feedback
+from src.utils.candidates import generate_approval_feedback, generate_rejection_feedback
 from src.utils.evaluation import (
     _build_transcript_turn,
     _validated_violation_count,
@@ -143,6 +144,32 @@ class EvaluationService:
             concerns=list(evaluation.concerns or []),
         )
         return AIRejectionFeedbackResponse(feedback=feedback)
+
+    async def create_approval_feedback(
+        self,
+        ca_id: uuid.UUID,
+        recruiter_id: uuid.UUID,
+    ) -> AIApprovalFeedbackResponse:
+        """Draft a candidate-facing approval message from persisted evidence."""
+        ca = await self._get_owned_candidate_assessment(
+            ca_id,
+            recruiter_id,
+            resource_name="evaluation",
+        )
+        evaluation = await self._evaluation_repo.get_by_candidate_assessment_id(ca_id)
+        if evaluation is None:
+            raise EvaluationNotFoundException()
+
+        feedback = await generate_approval_feedback(
+            candidate_name=ca.candidate.full_name if ca.candidate else "Candidate",
+            role_name=ca.assessment.role_name,
+            assessment_title=ca.assessment.title,
+            overall_summary=evaluation.overall_summary,
+            recommendation_reasoning=evaluation.recommendation_reasoning,
+            strengths=list(evaluation.strengths or []),
+            concerns=list(evaluation.concerns or []),
+        )
+        return AIApprovalFeedbackResponse(feedback=feedback)
 
     async def _get_owned_candidate_assessment(
         self,
