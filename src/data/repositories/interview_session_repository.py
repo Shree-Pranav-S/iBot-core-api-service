@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -10,7 +11,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import InvalidSessionAppendException
+from src.data.models.postgres.candidate_assessment import CandidateAssessment
 from src.data.models.postgres.interview_session import InterviewSession
+
+TAB_SWITCH_VIOLATION_TYPE = "tab_switch"
+MAX_ALLOWED_TAB_SWITCHES = 5
 
 
 def _uuid(value: str | uuid.UUID) -> uuid.UUID:
@@ -147,6 +152,93 @@ class InterviewSessionRepository:
             session.last_updated_at = func.now()
             await self._session.flush()
         return appended
+
+    async def record_tab_switch(
+        self,
+        session_id: str | uuid.UUID,
+        *,
+        connection_id: str,
+        candidate_assessment_id: uuid.UUID,
+        event_id: uuid.UUID,
+        occurred_at: datetime,
+    ) -> dict[str, Any]:
+        """Atomically append one low-severity tab switch and enforce the limit."""
+
+        session = await self._locked_session(session_id)
+        if session.candidate_assessment_id != candidate_assessment_id:
+            raise InvalidSessionAppendException(
+                "candidate_assessment_id does not match the interview session"
+            )
+
+        current = list(session.violations or [])
+        current_count = sum(
+            1
+            for item in current
+            if str(item.get("violation_type") or "") == TAB_SWITCH_VIOLATION_TYPE
+        )
+        if (
+            session.status not in {"INITIALIZING", "IN_PROGRESS"}
+            or session.active_connection_id != connection_id
+        ):
+            return {
+                "appended": False,
+                "tab_switch_count": current_count,
+                "terminated": session.status == "TERMINATED",
+                "status": session.status,
+            }
+
+        violation = {
+            "violation_id": f"tab-switch:{event_id}",
+            "turn_number": max(1, len(session.transcript or [])),
+            "violation_type": TAB_SWITCH_VIOLATION_TYPE,
+            "candidate_transcript": "",
+            "severity": "low",
+            "timestamp": occurred_at.isoformat(),
+            "metadata": {
+                "source": "browser_visibility",
+                "event_id": str(event_id),
+            },
+        }
+        violations, appended = _append_unique(
+            current,
+            violation,
+            id_key="violation_id",
+        )
+        if not appended:
+            return {
+                "appended": False,
+                "tab_switch_count": current_count,
+                "terminated": session.status == "TERMINATED",
+                "status": session.status,
+            }
+
+        tab_switch_count = current_count + 1
+        terminated = tab_switch_count > MAX_ALLOWED_TAB_SWITCHES
+        session.violations = violations
+        session.last_updated_at = func.now()
+        if terminated:
+            session.status = "TERMINATED"
+            session.reconnect_deadline = None
+            session.active_connection_id = None
+            await self._session.execute(
+                update(CandidateAssessment)
+                .where(CandidateAssessment.id == candidate_assessment_id)
+                .values(
+                    status="TERMINATED",
+                    interview_ended_at=func.coalesce(
+                        CandidateAssessment.interview_ended_at,
+                        func.now(),
+                    ),
+                    updated_at=func.now(),
+                )
+            )
+        await self._session.flush()
+        return {
+            "appended": True,
+            "tab_switch_count": tab_switch_count,
+            "terminated": terminated,
+            "status": session.status,
+        }
 
     async def update_elapsed_time(
         self,

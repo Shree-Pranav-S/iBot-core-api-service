@@ -39,6 +39,8 @@ from src.schemas.internal_interview import (
     MarkTimerStartedResponse,
     PersistTurnRequest,
     RecordDisconnectRequest,
+    RecordTabSwitchRequest,
+    RecordTabSwitchResponse,
     SaveFinalEvaluationRequest,
     SaveFinalEvaluationResponse,
 )
@@ -215,6 +217,30 @@ async def persist_turn(
             total_pause_secs=0,
         )
     return APIResponse(message="Turn persisted.", data={"status": "ok"})
+
+
+@router.post(
+    "/sessions/{session_id}/tab-switch",
+    response_model=APIResponse[RecordTabSwitchResponse],
+)
+async def record_tab_switch(
+    session_id: uuid.UUID,
+    body: RecordTabSwitchRequest,
+    repository: InterviewSessionRepository = Depends(get_interview_session_repository),
+) -> APIResponse[RecordTabSwitchResponse]:
+    """Persist a main-room tab switch and terminate after the fifth allowance."""
+
+    outcome = await repository.record_tab_switch(
+        session_id,
+        connection_id=body.connection_id,
+        candidate_assessment_id=body.candidate_assessment_id,
+        event_id=body.event_id,
+        occurred_at=body.occurred_at,
+    )
+    return APIResponse(
+        message="Tab switch recorded.",
+        data=RecordTabSwitchResponse.model_validate(outcome),
+    )
 
 
 @router.post(

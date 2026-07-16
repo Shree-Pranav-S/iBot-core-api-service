@@ -67,6 +67,24 @@ class RecordDisconnectRequest(AppBaseModel):
     elapsed_secs: int
 
 
+class RecordTabSwitchRequest(AppBaseModel):
+    """Trusted interview-engine request for one browser visibility violation."""
+
+    connection_id: str = Field(min_length=1, max_length=255)
+    candidate_assessment_id: uuid.UUID
+    event_id: uuid.UUID
+    occurred_at: datetime
+
+
+class RecordTabSwitchResponse(AppBaseModel):
+    """Atomic tab-switch count and termination outcome."""
+
+    appended: bool
+    tab_switch_count: int = Field(ge=0)
+    terminated: bool
+    status: str
+
+
 class InitializeGraphContextRequest(AppBaseModel):
     """Request to initialize graph context for a candidate assessment."""
 
