@@ -55,6 +55,7 @@ class CandidateConnectionContext(AppBaseModel):
     session_token_expires_at: datetime
     elapsed_secs: int = 0
     interview_started: bool = False
+    tab_switch_count: int = Field(default=0, ge=0)
 
 
 class RecordDisconnectRequest(AppBaseModel):

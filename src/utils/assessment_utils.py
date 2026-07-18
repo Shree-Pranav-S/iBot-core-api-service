@@ -4,20 +4,24 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Sequence
 
 from fastapi.concurrency import run_in_threadpool
 from groq import AsyncGroq
 from groq.types.chat import ChatCompletionMessageParam
 from groq.types.chat.completion_create_params import (
-    ResponseFormatResponseFormatJsonSchema,
+    ResponseFormatResponseFormatJsonObject,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from src.config.settings import settings
 from src.core.exceptions import JdParseFailedException, LlmAnalysisFailedException
 from src.schemas.assessment import (
+    BehaviouralCulturalSection,
     FocusAreaOverride,
     JDAnalysisAndInterviewPlan,
+    SelfIntroSection,
+    TechnicalInterviewSection,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,18 +29,66 @@ logger = logging.getLogger(__name__)
 _MAX_JD_CHARS_FOR_ANALYSIS = 8000
 
 
-def _structured_response_format(
-    response_model: type[BaseModel],
-) -> ResponseFormatResponseFormatJsonSchema:
-    """Build Groq strict Structured Outputs configuration from a Pydantic model."""
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": response_model.__name__.lower(),
-            "strict": True,
-            "schema": response_model.model_json_schema(),
-        },
-    }
+def _json_response_format() -> ResponseFormatResponseFormatJsonObject:
+    """Request JSON mode, which is supported by the configured Groq model."""
+    return {"type": "json_object"}
+
+
+def _normalize_skill_key(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _skill_alias_tokens(value: str) -> set[str]:
+    normalized = _normalize_skill_key(value)
+    if not normalized:
+        return set()
+    tokens = set(re.findall(r"[a-z0-9\+#\.]+", normalized))
+    tokens.add(normalized)
+    if normalized in {"sql", "structured query language"}:
+        tokens.update({"sql", "structured query language"})
+    return {token for token in tokens if token}
+
+
+def _match_score(left: str, right: str) -> int:
+    left_key = _normalize_skill_key(left)
+    right_key = _normalize_skill_key(right)
+    if left_key and left_key == right_key:
+        return 3
+    left_tokens = _skill_alias_tokens(left)
+    right_tokens = _skill_alias_tokens(right)
+    if left_tokens and right_tokens and left_tokens.intersection(right_tokens):
+        return 2
+    if left_key and right_key and (left_key in right_key or right_key in left_key):
+        return 1
+    return 0
+
+
+def _resolve_override_for_skill(
+    skill_name: str, overrides: list[FocusAreaOverride]
+) -> float | None:
+    """Return the best matching recruiter weight override for a skill."""
+    best_value: float | None = None
+    best_score = 0
+    for override in overrides:
+        score = _match_score(skill_name, override.skill)
+        if score > best_score:
+            best_score = score
+            best_value = override.weight_override
+    return best_value
+
+
+def _resolve_priority_for_skill(
+    combined: JDAnalysisAndInterviewPlan, skill_name: str
+) -> float:
+    """Resolve the matching JD priority for an LLM-selected technical section."""
+    best_priority = 1.0
+    best_score = 0
+    for skill in combined.jd_analysis.skills:
+        score = _match_score(skill_name, skill.skill)
+        if score > best_score:
+            best_score = score
+            best_priority = skill.priority_score
+    return best_priority
 
 
 def _min_minutes_per_skill(total_mins: int, technical_minutes: float) -> float:
@@ -54,9 +106,86 @@ def _min_minutes_per_skill(total_mins: int, technical_minutes: float) -> float:
     return 3.0
 
 
+def _target_skill_count(total_mins: int, technical_minutes: float) -> int:
+    """Choose how many technical skills fit without sacrificing useful depth."""
+    if technical_minutes <= 0:
+        return 0
+
+    min_per_skill = _min_minutes_per_skill(total_mins, technical_minutes)
+    hard_cap_by_time = max(1, int(technical_minutes // min_per_skill))
+    duration_soft_caps = {
+        2: 1,
+        3: 1,
+        4: 2,
+        5: 2,
+        8: 2,
+        10: 3,
+        15: 3,
+        20: 4,
+        30: 5,
+        45: 6,
+        60: 7,
+    }
+    soft_cap = 7
+    for threshold in sorted(duration_soft_caps):
+        if total_mins <= threshold:
+            soft_cap = duration_soft_caps[threshold]
+            break
+    return max(1, min(hard_cap_by_time, soft_cap))
+
+
+def _allocate_minutes_by_weight(
+    total_minutes: float,
+    effective_weights: Sequence[float],
+    *,
+    min_minutes_per_skill: float,
+) -> list[float]:
+    """Allocate the technical budget by priority in exact 0.1-minute units."""
+    skill_count = len(effective_weights)
+    if skill_count == 0:
+        return []
+
+    total_units = int(round(total_minutes * 10))
+    min_units_per_skill = max(1, int(round(min_minutes_per_skill * 10)))
+    base_units = min_units_per_skill * skill_count
+    if total_units < base_units:
+        even = total_units // skill_count
+        remainder = total_units % skill_count
+        return [
+            (even + (1 if index < remainder else 0)) / 10.0
+            for index in range(skill_count)
+        ]
+
+    extra_units = total_units - base_units
+    boosted_weights = [max(weight, 0.0) ** 2 for weight in effective_weights]
+    total_weight = sum(boosted_weights)
+    if total_weight <= 0:
+        distributed = [extra_units // skill_count] * skill_count
+        for index in range(extra_units % skill_count):
+            distributed[index] += 1
+    else:
+        scaled = [extra_units * weight / total_weight for weight in boosted_weights]
+        distributed = [int(value) for value in scaled]
+        remainder = extra_units - sum(distributed)
+        order = sorted(
+            range(skill_count),
+            key=lambda index: (
+                scaled[index] - distributed[index],
+                boosted_weights[index],
+            ),
+            reverse=True,
+        )
+        for index in order[:remainder]:
+            distributed[index] += 1
+
+    return [(min_units_per_skill + extra) / 10.0 for extra in distributed]
+
+
 def _estimated_technical_minutes(total_mins: int) -> float:
     """Approximate technical time after intro and behavioural sections."""
-    return max(total_mins * 0.8, 0.0)
+    self_intro = min(total_mins * 0.1, 1.5)
+    behavioural = total_mins * 0.1
+    return max(total_mins - self_intro - behavioural, 0.0)
 
 
 def _truncate_jd_text(jd_text: str, max_chars: int = _MAX_JD_CHARS_FOR_ANALYSIS) -> str:
@@ -81,13 +210,94 @@ def _focus_areas_for_prompt(focus_areas: list[FocusAreaOverride] | None) -> str:
 def _finalize_analysis(
     combined: JDAnalysisAndInterviewPlan,
     duration_mins: int,
+    focus_areas: list[FocusAreaOverride] | None,
 ) -> JDAnalysisAndInterviewPlan:
-    """Apply request-level metadata without rewriting LLM-generated plan content."""
+    """Apply request metadata and deterministic section timing invariants."""
     combined.interview_plan.total_mins = duration_mins
     combined.interview_plan.inferred_difficulty = (
         combined.jd_analysis.inferred_difficulty
     )
+    _normalize_interview_plan_timing(combined, focus_areas or [])
     return combined
+
+
+def _normalize_interview_plan_timing(
+    combined: JDAnalysisAndInterviewPlan,
+    focus_areas: list[FocusAreaOverride],
+) -> None:
+    """Enforce fixed intro/behavioural shares and priority-weight technical time."""
+    total_mins = int(combined.interview_plan.total_mins)
+    total_units = total_mins * 10
+    self_intro_units = min(total_mins, 15)
+    behavioural_units = total_mins
+    technical_units = total_units - self_intro_units - behavioural_units
+
+    self_intro = next(
+        (
+            section
+            for section in combined.interview_plan.sections
+            if isinstance(section, SelfIntroSection)
+        ),
+        None,
+    )
+    behavioural = next(
+        (
+            section
+            for section in combined.interview_plan.sections
+            if isinstance(section, BehaviouralCulturalSection)
+        ),
+        None,
+    )
+    technical_sections = [
+        section
+        for section in combined.interview_plan.sections
+        if isinstance(section, TechnicalInterviewSection)
+    ]
+    if not technical_sections or technical_units <= 0:
+        raise ValueError("Interview plan requires at least one technical section")
+
+    scored_sections: list[tuple[TechnicalInterviewSection, float, float, int]] = []
+    for index, section in enumerate(technical_sections):
+        priority = _resolve_priority_for_skill(combined, section.skill)
+        override = _resolve_override_for_skill(section.skill, focus_areas)
+        effective = override if override is not None else priority
+        scored_sections.append((section, priority, effective, index))
+
+    scored_sections.sort(
+        key=lambda item: (item[2], item[1], -item[3]),
+        reverse=True,
+    )
+    technical_minutes = technical_units / 10.0
+    selected = scored_sections[: _target_skill_count(total_mins, technical_minutes)]
+    allocations = _allocate_minutes_by_weight(
+        technical_minutes,
+        [item[2] for item in selected],
+        min_minutes_per_skill=_min_minutes_per_skill(total_mins, technical_minutes),
+    )
+
+    if self_intro is None:
+        self_intro = SelfIntroSection()
+    self_intro.skill = None
+    self_intro.allocated_mins = self_intro_units / 10.0
+
+    normalized_sections: list[
+        SelfIntroSection | TechnicalInterviewSection | BehaviouralCulturalSection
+    ] = [self_intro]
+    for (section, _priority, _effective, _index), allocated in zip(
+        selected, allocations, strict=True
+    ):
+        section.allocated_mins = allocated
+        normalized_sections.append(section)
+
+    if behavioural is None:
+        behavioural = BehaviouralCulturalSection(
+            allocated_mins=behavioural_units / 10.0,
+            expected_signals=combined.jd_analysis.behavioural_signals[:4],
+        )
+    behavioural.skill = None
+    behavioural.allocated_mins = behavioural_units / 10.0
+    normalized_sections.append(behavioural)
+    combined.interview_plan.sections = normalized_sections
 
 
 async def parse_pdf_jd(file_bytes: bytes, filename: str) -> str:
@@ -289,11 +499,11 @@ INTERVIEW PLAN — HARD RULES
   1. `self_intro`
   2. technical or domain skill sections in descending effective importance
   3. `behavioural_cultural`
-- `self_intro` is capped at min(10 percent of total duration, 1.0 minute), has `skill: null`,
+- `self_intro` must be exactly min(10 percent of total duration, 1.5 minutes), has `skill: null`,
   and must NOT contain `expected_signals`.
-- `behavioural_cultural` must never exceed 10 percent of total interview time.
-  For 5 minutes it is at most 0.5 minutes; for 15 minutes it is at most 1.5
-  minutes; for 30 minutes it is at most 3.0.
+- `behavioural_cultural` must be exactly 10 percent of total interview time.
+  For 5 minutes it is 0.5 minutes; for 15 minutes it is 1.5 minutes; for 30
+  minutes it is 3.0 minutes.
 - Prefer a focused skill set over shallow coverage. A short interview should
   probe a few high-priority skills deeply rather than listing every JD skill.
 - Suggested technical skill counts by interview length (after intro/behavioural):
@@ -314,13 +524,31 @@ INTERVIEW PLAN — HARD RULES
   Tailor signals to the profession (e.g., "Ability to explain DCF assumptions and
   sensitivity drivers" for finance; "Ability to walk through REST API design
   trade-offs" for backend engineering).
+- Every technical/domain section must include a compact `question_brief` grounded
+  only in the supplied JD. It is steering context for live question generation,
+  not a question bank and not an exhaustive syllabus.
+  * `expected_signals` must copy the section's top-level expected_signals exactly.
+  * `role_responsibility` connects the skill to one concrete duty or outcome in
+    the JD, in one concise sentence.
+  * `operating_environment` summarizes the relevant stack, workflow, business
+    setting, or production context. Use "Not specified in the JD" when absent.
+  * `important_tools` lists at most six named tools, platforms, frameworks,
+    methods, or standards that are directly relevant to this section.
+  * `constraints` lists at most six JD-grounded concerns such as scale,
+    reliability, security, compliance, cost, deadlines, or data quality.
+  * `seniority_depth` states the reasoning depth appropriate for the inferred
+    role level and this responsibility; it must not invent senior ownership.
+  * `out_of_scope_topics` lists at most six explicitly peripheral, optional, or
+    clearly over-level adjacent topics. Use an empty list when the JD gives no
+    defensible exclusion.
+- Keep every question-brief string concise. Never put sample interview questions,
+  candidate-specific content, scoring instructions, or ideal answers in the brief.
 - Behavioural/cultural signals must cover both work behaviour (ownership,
   collaboration, conflict handling, adaptability, communication) and alignment
   with team culture or working norms.
 - Do not include `priority_score` in interview-plan sections. Priority lives only
   in `jd_analysis`.
-- Do not include question-count limits, follow-up limits, depth fields, role-title
-  fields, or any other undeclared fields.
+- Do not include question-count limits, follow-up limits, or any undeclared fields.
 - Use one decimal place for section minutes. Allocations must sum exactly to
   `total_mins`.
 
@@ -373,52 +601,97 @@ Therefore the inferred difficulty is junior level. A valid output is:
       {
         "section_name": "self_intro",
         "skill": null,
-        "allocated_mins": 1.0
+        "allocated_mins": 1.5
       },
       {
         "section_name": "Python",
         "skill": "Python",
-        "allocated_mins": 4.1,
+        "allocated_mins": 4.0,
         "expected_signals": [
           "Understanding of Python fundamentals",
           "Ability to write clean and readable code"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of Python fundamentals", "Ability to write clean and readable code"],
+          "role_responsibility": "Build and maintain Python backend functionality described in the JD.",
+          "operating_environment": "Junior Python backend development in a web application stack.",
+          "important_tools": ["Python", "Python Web Framework"],
+          "constraints": ["Readable code", "Maintainability"],
+          "seniority_depth": "Test junior-level foundations and simple applied reasoning without architecture ownership.",
+          "out_of_scope_topics": []
+        }
       },
       {
         "section_name": "SQL",
         "skill": "SQL",
-        "allocated_mins": 3.5,
+        "allocated_mins": 3.4,
         "expected_signals": [
           "Understanding of SQL query fundamentals",
           "Ability to construct role-relevant queries"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of SQL query fundamentals", "Ability to construct role-relevant queries"],
+          "role_responsibility": "Use SQL to access and work with backend application data.",
+          "operating_environment": "Relational persistence supporting a Python web backend.",
+          "important_tools": ["SQL", "Relational Database"],
+          "constraints": ["Correctness", "Basic query efficiency"],
+          "seniority_depth": "Probe junior query fundamentals and straightforward application-data decisions.",
+          "out_of_scope_topics": []
+        }
       },
       {
         "section_name": "Database Foundations",
         "skill": "Database Foundations",
-        "allocated_mins": 3.1,
+        "allocated_mins": 3.0,
         "expected_signals": [
           "Understanding of relational database concepts",
           "Ability to explain basic schema decisions"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of relational database concepts", "Ability to explain basic schema decisions"],
+          "role_responsibility": "Support backend persistence through sound relational data fundamentals.",
+          "operating_environment": "Application schemas and persistence for a junior backend role.",
+          "important_tools": ["Relational Database", "SQL"],
+          "constraints": ["Data consistency", "Simple maintainable schemas"],
+          "seniority_depth": "Assess foundational relational reasoning rather than large-scale database architecture.",
+          "out_of_scope_topics": []
+        }
       },
       {
         "section_name": "Git",
         "skill": "Git",
-        "allocated_mins": 0.9,
+        "allocated_mins": 0.8,
         "expected_signals": [
           "Understanding of core Git concepts",
           "Ability to use Git in a collaborative workflow"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of core Git concepts", "Ability to use Git in a collaborative workflow"],
+          "role_responsibility": "Use version control while contributing backend changes with a team.",
+          "operating_environment": "Collaborative software delivery workflow.",
+          "important_tools": ["Git"],
+          "constraints": ["Safe collaboration", "Traceable changes"],
+          "seniority_depth": "Focus on everyday junior workflows and recovery from common mistakes.",
+          "out_of_scope_topics": ["Advanced Git internals"]
+        }
       },
       {
         "section_name": "Python Web Framework",
         "skill": "Python Web Framework",
-        "allocated_mins": 0.9,
+        "allocated_mins": 0.8,
         "expected_signals": [
           "Understanding of web framework fundamentals",
           "Ability to apply a Python framework to a simple backend task"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of web framework fundamentals", "Ability to apply a Python framework to a simple backend task"],
+          "role_responsibility": "Implement simple backend endpoints using a Python web framework.",
+          "operating_environment": "Python web application backend; no specific framework is emphasized.",
+          "important_tools": ["Python Web Framework", "Python"],
+          "constraints": ["Correct request handling", "Maintainability"],
+          "seniority_depth": "Assess framework fundamentals and simple application decisions at junior level.",
+          "out_of_scope_topics": ["Framework-specific internals not named in the JD"]
+        }
       },
       {
         "section_name": "behavioural_cultural",
@@ -483,43 +756,79 @@ inferred difficulty is junior level. A valid output is:
       {
         "section_name": "self_intro",
         "skill": null,
-        "allocated_mins": 1.0
+        "allocated_mins": 1.5
       },
       {
         "section_name": "Credit Analysis",
         "skill": "Credit Analysis",
-        "allocated_mins": 4.0,
+        "allocated_mins": 3.9,
         "expected_signals": [
           "Understanding of credit risk factors and borrower assessment",
           "Ability to explain how lending decisions are supported by evidence"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of credit risk factors and borrower assessment", "Ability to explain how lending decisions are supported by evidence"],
+          "role_responsibility": "Assess borrower creditworthiness and support evidence-based lending decisions.",
+          "operating_environment": "Junior credit underwriting workflow for lending products.",
+          "important_tools": ["Credit Analysis", "Borrower Financials"],
+          "constraints": ["Incomplete information", "Credit risk", "Regulatory process"],
+          "seniority_depth": "Probe junior underwriting fundamentals and sound escalation judgment.",
+          "out_of_scope_topics": ["Portfolio-level credit strategy"]
+        }
       },
       {
         "section_name": "Financial Statement Analysis",
         "skill": "Financial Statement Analysis",
-        "allocated_mins": 3.6,
+        "allocated_mins": 3.5,
         "expected_signals": [
           "Understanding of balance sheet, income statement, and cash-flow drivers",
           "Ability to identify red flags in borrower financials"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of balance sheet, income statement, and cash-flow drivers", "Ability to identify red flags in borrower financials"],
+          "role_responsibility": "Evaluate borrower financial statements for repayment capacity and warning signs.",
+          "operating_environment": "Credit assessment using borrower accounting and cash-flow information.",
+          "important_tools": ["Balance Sheet", "Income Statement", "Cash-Flow Statement"],
+          "constraints": ["Data accuracy", "Repayment risk", "Incomplete disclosures"],
+          "seniority_depth": "Assess junior statement interpretation and defensible red-flag identification.",
+          "out_of_scope_topics": ["Complex consolidated-accounting policy"]
+        }
       },
       {
         "section_name": "Excel Financial Modeling",
         "skill": "Excel Financial Modeling",
-        "allocated_mins": 3.2,
+        "allocated_mins": 3.1,
         "expected_signals": [
           "Understanding of ratio and cash-flow modeling concepts",
           "Ability to describe assumptions and sensitivity checks"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of ratio and cash-flow modeling concepts", "Ability to describe assumptions and sensitivity checks"],
+          "role_responsibility": "Build Excel analyses that support borrower cash-flow and ratio assessment.",
+          "operating_environment": "Spreadsheet-based credit analysis and lending-decision support.",
+          "important_tools": ["Excel", "Financial Ratios", "Sensitivity Analysis"],
+          "constraints": ["Transparent assumptions", "Model accuracy", "Auditability"],
+          "seniority_depth": "Probe junior modeling fundamentals and basic validation of assumptions.",
+          "out_of_scope_topics": ["Enterprise model governance"]
+        }
       },
       {
         "section_name": "KYC/AML Compliance",
         "skill": "KYC/AML Compliance",
-        "allocated_mins": 1.2,
+        "allocated_mins": 1.0,
         "expected_signals": [
           "Understanding of basic KYC/AML obligations in lending workflows",
           "Ability to explain documentation and escalation steps"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of basic KYC/AML obligations in lending workflows", "Ability to explain documentation and escalation steps"],
+          "role_responsibility": "Complete required KYC and AML checks within the credit workflow.",
+          "operating_environment": "Regulated lending operations and borrower onboarding.",
+          "important_tools": ["KYC", "AML", "Customer Documentation"],
+          "constraints": ["Regulatory compliance", "Documentation quality", "Escalation"],
+          "seniority_depth": "Assess junior recognition of obligations and correct escalation, not policy ownership.",
+          "out_of_scope_topics": ["Designing enterprise AML policy"]
+        }
       },
       {
         "section_name": "Lending Products",
@@ -528,7 +837,16 @@ inferred difficulty is junior level. A valid output is:
         "expected_signals": [
           "Understanding of common lending product types",
           "Ability to relate product features to borrower needs"
-        ]
+        ],
+        "question_brief": {
+          "expected_signals": ["Understanding of common lending product types", "Ability to relate product features to borrower needs"],
+          "role_responsibility": "Recognize how common lending products fit borrower financing needs.",
+          "operating_environment": "Term-loan and working-capital credit assessment.",
+          "important_tools": ["Term Loans", "Working-Capital Products"],
+          "constraints": ["Borrower suitability", "Repayment structure"],
+          "seniority_depth": "Test junior product fundamentals without requiring product-strategy ownership.",
+          "out_of_scope_topics": ["Complex structured finance"]
+        }
       },
       {
         "section_name": "behavioural_cultural",
@@ -566,13 +884,22 @@ The exact permitted structure is:
       {
         "section_name": "self_intro",
         "skill": null,
-        "allocated_mins": 1.0
+        "allocated_mins": 1.5
       },
       {
         "section_name": "exact technical or domain skill name",
         "skill": "exact technical or domain skill name",
         "allocated_mins": 1.0,
-        "expected_signals": ["string", "string"]
+        "expected_signals": ["string", "string"],
+        "question_brief": {
+          "expected_signals": ["string", "string"],
+          "role_responsibility": "string",
+          "operating_environment": "string",
+          "important_tools": ["string"],
+          "constraints": ["string"],
+          "seniority_depth": "string",
+          "out_of_scope_topics": ["string"]
+        }
       },
       {
         "section_name": "behavioural_cultural",
@@ -661,13 +988,13 @@ async def run_jd_analysis_and_interview_plan(
                     user_prompt=base_user_prompt,
                     repair_note=repair_note,
                 ),
-                response_format=_structured_response_format(JDAnalysisAndInterviewPlan),
+                response_format=_json_response_format(),
                 temperature=0.1,
             )
             raw_content = completion.choices[0].message.content or ""
             parsed_json = json.loads(raw_content)
             combined = JDAnalysisAndInterviewPlan.model_validate(parsed_json)
-            return _finalize_analysis(combined, duration_mins)
+            return _finalize_analysis(combined, duration_mins, focus_areas)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_exc = exc
             if attempt < max_attempts - 1:

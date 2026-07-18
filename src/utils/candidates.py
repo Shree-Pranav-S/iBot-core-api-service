@@ -277,7 +277,40 @@ async def send_invitation_email(
     <head>
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+      <meta name="color-scheme" content="light only" />
+      <meta name="supported-color-schemes" content="light only" />
       <title>Interview Invitation</title>
+      <style>
+        :root {{
+          color-scheme: light only;
+          supported-color-schemes: light only;
+        }}
+        @media (prefers-color-scheme: dark) {{
+          .interview-cta-cell {{
+            background-color: #4f46e5 !important;
+            background-image: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
+            border-color: #312e81 !important;
+          }}
+          .interview-cta-link,
+          .interview-cta-link span {{
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+          }}
+        }}
+        [data-ogsc] .interview-cta-cell,
+        [data-ogsb] .interview-cta-cell {{
+          background-color: #4f46e5 !important;
+          background-image: linear-gradient(135deg, #4f46e5, #7c3aed) !important;
+          border-color: #312e81 !important;
+        }}
+        [data-ogsc] .interview-cta-link,
+        [data-ogsc] .interview-cta-link span,
+        [data-ogsb] .interview-cta-link,
+        [data-ogsb] .interview-cta-link span {{
+          color: #ffffff !important;
+          -webkit-text-fill-color: #ffffff !important;
+        }}
+      </style>
     </head>
     <body style="margin:0;padding:0;background-color:#f4f6fa;font-family:'Segoe UI',Arial,sans-serif;">
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6fa;padding:40px 0;">
@@ -334,10 +367,31 @@ async def send_invitation_email(
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
                       <td align="center" style="padding:8px 0 28px;">
-                        <a href="{invitation_link}" target="_blank"
-                           style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:16px 48px;border-radius:50px;box-shadow:0 4px 16px rgba(79,70,229,0.4);letter-spacing:0.3px;">
-                          Start Your Interview →
-                        </a>
+                        <!--[if mso]>
+                        <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml"
+                                     xmlns:w="urn:schemas-microsoft-com:office:word"
+                                     href="{invitation_link}"
+                                     style="height:54px;v-text-anchor:middle;width:326px;"
+                                     arcsize="50%" strokecolor="#312e81" fillcolor="#4f46e5">
+                          <w:anchorlock/>
+                          <center style="color:#ffffff;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;">
+                            Start Your Interview &#8594;
+                          </center>
+                        </v:roundrect>
+                        <![endif]-->
+                        <!--[if !mso]><!-->
+                        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                          <tr>
+                            <td class="interview-cta-cell" align="center" bgcolor="#4f46e5"
+                                style="background-color:#4f46e5 !important;background-image:linear-gradient(135deg,#4f46e5,#7c3aed);border:2px solid #312e81;border-radius:50px;box-shadow:0 4px 16px rgba(79,70,229,0.4);">
+                              <a class="interview-cta-link" href="{invitation_link}" target="_blank" role="button"
+                                 style="display:block;min-width:230px;padding:15px 46px;color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;text-decoration:none;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;line-height:20px;letter-spacing:0.3px;text-align:center;text-shadow:0 1px 1px rgba(0,0,0,0.25);">
+                                <span style="color:#ffffff !important;-webkit-text-fill-color:#ffffff !important;">Start Your Interview &#8594;</span>
+                              </a>
+                            </td>
+                          </tr>
+                        </table>
+                        <!--<![endif]-->
                       </td>
                     </tr>
                   </table>

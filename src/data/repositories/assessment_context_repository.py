@@ -38,6 +38,8 @@ class AssessmentContextRepository:
                 CandidateAssessment.interview_started_at,
                 CandidateAssessment.resume_parsed,
                 Candidate.full_name.label("candidate_name"),
+                Assessment.role_name,
+                Assessment.jd_analysis,
                 Assessment.interview_plan,
                 Assessment.interview_duration_mins,
                 func.coalesce(Recruiter.company_name, "").label("company_name"),

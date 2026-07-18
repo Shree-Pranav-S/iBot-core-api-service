@@ -66,8 +66,20 @@ class SelfIntroSection(AppBaseModel):
     )
     allocated_mins: float = Field(
         default=1.0,
-        description="Self intro is capped at min(10% of total duration, 1 minute)",
+        description="Self intro is exactly min(10% of total duration, 1.5 minutes)",
     )
+
+
+class TechnicalQuestionBrief(AppBaseModel):
+    """Compact JD grounding supplied to live technical-question generation."""
+
+    expected_signals: list[str] = Field(min_length=2, max_length=4)
+    role_responsibility: str = Field(min_length=1, max_length=320)
+    operating_environment: str = Field(min_length=1, max_length=240)
+    important_tools: list[str] = Field(default_factory=list, max_length=6)
+    constraints: list[str] = Field(default_factory=list, max_length=6)
+    seniority_depth: str = Field(min_length=1, max_length=240)
+    out_of_scope_topics: list[str] = Field(default_factory=list, max_length=6)
 
 
 class TechnicalInterviewSection(AppBaseModel):
@@ -82,6 +94,9 @@ class TechnicalInterviewSection(AppBaseModel):
         default_factory=list,
         description="What the bot should listen for while assessing this technical skill",
     )
+    # Optional only for backward compatibility with plans stored before question
+    # briefs existed. New combined JD analysis requires it below.
+    question_brief: TechnicalQuestionBrief | None = None
 
     @model_validator(mode="after")
     def validate_technical_section(self) -> "TechnicalInterviewSection":
@@ -93,6 +108,11 @@ class TechnicalInterviewSection(AppBaseModel):
 
         if self.section_name != self.skill:
             raise ValueError("For technical sections, section_name must match skill.")
+
+        # Keep the established top-level signals authoritative for evaluation and
+        # mirror them into the live-generation brief to avoid prompt drift.
+        if self.question_brief is not None:
+            self.question_brief.expected_signals = list(self.expected_signals)
 
         return self
 
@@ -110,7 +130,7 @@ class BehaviouralCulturalSection(AppBaseModel):
     allocated_mins: float = Field(
         ...,
         gt=0,
-        description="Deterministically normalized to no more than 10 percent of total interview time",
+        description="Deterministically normalized to exactly 10 percent of total interview time",
     )
     expected_signals: list[str] = Field(
         default_factory=list,
@@ -181,6 +201,17 @@ class JDAnalysisAndInterviewPlan(AppBaseModel):
         """
 
         self.interview_plan.inferred_difficulty = self.jd_analysis.inferred_difficulty
+        missing_briefs = [
+            section.skill
+            for section in self.interview_plan.sections
+            if isinstance(section, TechnicalInterviewSection)
+            and section.question_brief is None
+        ]
+        if missing_briefs:
+            raise ValueError(
+                "Every technical interview section requires question_brief: "
+                + ", ".join(missing_briefs)
+            )
         return self
 
 

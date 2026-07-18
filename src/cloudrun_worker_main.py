@@ -51,6 +51,7 @@ def main() -> None:
         "--loglevel=INFO",
         "--queues=core.assessment,core.email,core.default",
         "--pool=solo",
+        "--beat",
     ]
 
     port = int(os.environ.get("PORT", "8080"))

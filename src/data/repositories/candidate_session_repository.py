@@ -161,6 +161,7 @@ class CandidateSessionRepository:
                 InterviewSession.active_connection_id,
                 InterviewSession.total_elapsed_secs,
                 InterviewSession.total_pause_secs,
+                InterviewSession.violations,
                 CandidateAssessment.candidate_id,
                 CandidateAssessment.assessment_id,
                 CandidateAssessment.status.label("candidate_assessment_status"),

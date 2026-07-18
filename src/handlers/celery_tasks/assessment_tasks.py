@@ -96,7 +96,7 @@ async def _process_assessment(
             groq_client,
         )
         async with async_session_scope() as session:
-            await AssessmentRepository(session).activate_assessment(
+            final_status = await AssessmentRepository(session).activate_assessment(
                 assessment_uuid,
                 formatted_jd_text,
                 jd_analysis.model_dump(),
@@ -104,12 +104,16 @@ async def _process_assessment(
             )
         await publish_recruiter_event(
             recruiter_id=recruiter_id,
-            event_type=RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED,
+            event_type=(
+                RecruiterEventType.ASSESSMENT_PROCESSING_COMPLETED
+                if final_status == "ACTIVE"
+                else RecruiterEventType.ASSESSMENT_EXPIRED
+            ),
             payload={
                 "assessment_id": str(assessment_uuid),
                 "title": title,
                 "role_name": role_name,
-                "status": "ACTIVE",
+                "status": final_status,
             },
         )
         logger.info(
@@ -264,6 +268,36 @@ def enqueue_assessment_processing(
         jd_filename,
         focus_areas_payload,
     )
+
+
+async def _close_expired_assessments() -> int:
+    """Close elapsed assessment windows and notify connected recruiter UIs."""
+
+    async with async_session_scope() as session:
+        expired = await AssessmentRepository(session).close_expired_assessments()
+
+    for assessment in expired:
+        await publish_recruiter_event(
+            recruiter_id=uuid.UUID(str(assessment["recruiter_id"])),
+            event_type=RecruiterEventType.ASSESSMENT_EXPIRED,
+            payload={
+                "assessment_id": str(assessment["id"]),
+                "title": str(assessment["title"]),
+                "role_name": str(assessment["role_name"]),
+                "status": "CLOSED",
+            },
+        )
+    return len(expired)
+
+
+@celery_app.task(name="core.close_expired_assessments")  # type: ignore
+def close_expired_assessments_task() -> int:
+    """Periodic idempotent task that closes elapsed assessment windows."""
+
+    count = run_async(_close_expired_assessments())
+    if count:
+        logger.info("Automatically closed %s expired assessments.", count)
+    return count
 
 
 async def _dispatch_assessment_cancellations(assessment_uuid: uuid.UUID) -> None:

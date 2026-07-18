@@ -68,6 +68,19 @@ def _sections_overview(context: dict[str, Any]) -> list[str]:
     ]
 
 
+def _tab_switch_count(violations: object) -> int:
+    """Count durable browser-focus violations without trusting client state."""
+
+    if not isinstance(violations, list):
+        return 0
+    return sum(
+        1
+        for violation in violations
+        if isinstance(violation, dict)
+        and violation.get("violation_type") == "tab_switch"
+    )
+
+
 class InterviewSessionService:
     """Own invitation consumption, session authentication, and reconnect rules."""
 
@@ -156,8 +169,26 @@ class InterviewSessionService:
                     context.get("candidate_assessment_status") or ""
                 ).upper()
                 correlation_id = str(candidate_session["id"])
+                now = _utc_now()
+                window_end = _aware(context.get("window_end"))
 
                 if (
+                    window_end is not None
+                    and window_end <= now
+                    and context.get("interview_started_at") is None
+                ):
+                    await self._record(
+                        event_repository,
+                        event_name=EventName.INVITE_LINK_REJECTED,
+                        correlation_id=correlation_id,
+                        candidate_assessment_id=candidate_assessment_id,
+                        metadata={
+                            "reason": "assessment_window_expired",
+                            "window_end": window_end.isoformat(),
+                        },
+                    )
+                    rejection = SessionExpiredException()
+                elif (
                     session_status in TERMINAL_SESSION_STATUSES
                     or candidate_status in TERMINAL_CANDIDATE_STATUSES
                 ):
@@ -174,7 +205,6 @@ class InterviewSessionService:
                     )
                     rejection = SessionClosedException()
                 else:
-                    now = _utc_now()
                     expires_at = _aware(
                         candidate_session.get("session_token_expires_at")
                     )
@@ -201,7 +231,6 @@ class InterviewSessionService:
                                 int(context.get("interview_duration_mins") or 0),
                             )
                             minimum_expiry = now + timedelta(minutes=duration_mins + 60)
-                            window_end = _aware(context.get("window_end"))
                             expires_at = max(
                                 minimum_expiry,
                                 (window_end + timedelta(hours=1))
@@ -295,6 +324,13 @@ class InterviewSessionService:
             return InvalidSessionTokenException()
         expires_at = _aware(context.get("session_token_expires_at"))
         if expires_at is None or expires_at <= _utc_now():
+            return SessionExpiredException()
+        window_end = _aware(context.get("window_end"))
+        if (
+            window_end is not None
+            and window_end <= _utc_now()
+            and context.get("interview_started_at") is None
+        ):
             return SessionExpiredException()
         if (
             str(context.get("session_status") or "").upper()
@@ -419,6 +455,7 @@ class InterviewSessionService:
                         interview_started=(
                             context.get("interview_started_at") is not None
                         ),
+                        tab_switch_count=_tab_switch_count(context.get("violations")),
                     )
 
         if rejection is not None:

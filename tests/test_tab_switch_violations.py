@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.core.services.interview_session_service import _tab_switch_count
 from src.data.repositories.interview_session_repository import (
     InterviewSessionRepository,
 )
@@ -18,6 +19,18 @@ def _tab_violation(event_id: object) -> dict[str, object]:
         "violation_type": "tab_switch",
         "severity": "low",
     }
+
+
+def test_durable_tab_switch_count_ignores_other_violation_types() -> None:
+    violations = [
+        _tab_violation(uuid4()),
+        {"violation_type": "prompt_injection", "severity": "critical"},
+        _tab_violation(uuid4()),
+        "invalid-entry",
+    ]
+
+    assert _tab_switch_count(violations) == 2
+    assert _tab_switch_count(None) == 0
 
 
 def _session(
