@@ -28,6 +28,7 @@ from src.data.repositories.candidate_session_repository import (
     CandidateSessionRepository,
 )
 from src.data.repositories.event_logs_repository import EventLogsRepository
+from src.data.repositories.interview_session_repository import tab_switch_count
 from src.schemas.event_log import EventLogCreate, EventName, EventSource
 from src.schemas.internal_interview import (
     CandidateConnectionContext,
@@ -69,16 +70,9 @@ def _sections_overview(context: dict[str, Any]) -> list[str]:
 
 
 def _tab_switch_count(violations: object) -> int:
-    """Count durable browser-focus violations without trusting client state."""
+    """Read the durable occurrence counter without trusting client state."""
 
-    if not isinstance(violations, list):
-        return 0
-    return sum(
-        1
-        for violation in violations
-        if isinstance(violation, dict)
-        and violation.get("violation_type") == "tab_switch"
-    )
+    return tab_switch_count(violations)
 
 
 class InterviewSessionService:

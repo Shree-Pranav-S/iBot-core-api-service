@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -50,6 +51,26 @@ class SeverityCounts(AppBaseModel):
     critical: int
 
 
+class ViolationCategoryDetail(AppBaseModel):
+    """Deterministic occurrence details retained for one violation category."""
+
+    violation_type: str
+    severity: Literal["low", "medium", "high", "critical"]
+    scored_occurrence_count: int = Field(default=1, ge=1)
+    occurrence_count: int = Field(ge=1)
+    timestamp: str | None = None
+    termination_triggered: bool = False
+    termination_reason: str | None = None
+    tab_switch_count: int | None = Field(default=None, ge=1)
+    observed_duration_ms: int | None = Field(default=None, ge=0)
+    observed_durations_ms: list[int] = Field(default_factory=list)
+    max_observed_duration_ms: int | None = Field(default=None, ge=0)
+    total_observed_duration_ms: int | None = Field(default=None, ge=0)
+    termination_duration_ms: int | None = Field(default=None, ge=0)
+    max_face_count: int | None = Field(default=None, ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ViolationSummary(AppBaseModel):
     """Summary of validated proctoring or integrity violations."""
 
@@ -59,6 +80,7 @@ class ViolationSummary(AppBaseModel):
     summary: str
     penalty_applied: float = 0.0
     hard_gate_reasons: list[str] = Field(default_factory=list)
+    category_details: list[ViolationCategoryDetail] = Field(default_factory=list)
 
 
 class InterviewEvaluationResponse(AppBaseModel):

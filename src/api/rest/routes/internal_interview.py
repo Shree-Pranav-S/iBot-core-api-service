@@ -39,6 +39,8 @@ from src.schemas.internal_interview import (
     MarkTimerStartedResponse,
     PersistTurnRequest,
     RecordDisconnectRequest,
+    RecordProctoringEventRequest,
+    RecordProctoringEventResponse,
     RecordTabSwitchRequest,
     RecordTabSwitchResponse,
     SaveFinalEvaluationRequest,
@@ -240,6 +242,39 @@ async def record_tab_switch(
     return APIResponse(
         message="Tab switch recorded.",
         data=RecordTabSwitchResponse.model_validate(outcome),
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/proctoring-event",
+    response_model=APIResponse[RecordProctoringEventResponse],
+)
+async def record_proctoring_event(
+    session_id: uuid.UUID,
+    body: RecordProctoringEventRequest,
+    repository: InterviewSessionRepository = Depends(get_interview_session_repository),
+) -> APIResponse[RecordProctoringEventResponse]:
+    """Persist one server-qualified face presence or face-count episode."""
+
+    outcome = await repository.record_proctoring_event(
+        session_id,
+        connection_id=body.connection_id,
+        candidate_assessment_id=body.candidate_assessment_id,
+        event_id=body.event_id,
+        event_type=body.event_type,
+        condition_started_at=body.condition_started_at,
+        observed_duration_ms=body.observed_duration_ms,
+        sample_count=body.sample_count,
+        max_face_count=body.max_face_count,
+        min_confidence=body.min_confidence,
+        max_confidence=body.max_confidence,
+        source=body.source,
+        detector_version=body.detector_version,
+        model_name=body.model_name,
+    )
+    return APIResponse(
+        message="Proctoring event recorded.",
+        data=RecordProctoringEventResponse.model_validate(outcome),
     )
 
 

@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 from src.schemas.assessment import JDAnalysisAndInterviewPlan
@@ -85,7 +86,7 @@ async def test_jd_analysis_uses_json_object_response_mode() -> None:
         "We need a Python backend engineer who owns reliable services.",
         10,
         None,
-        groq_client,
+        cast(Any, groq_client),
     )
 
     assert generated.jd_analysis.inferred_difficulty == "mid-level"

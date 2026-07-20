@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -81,8 +81,38 @@ class RecordTabSwitchResponse(AppBaseModel):
     """Atomic tab-switch count and termination outcome."""
 
     appended: bool
+    recorded: bool
     tab_switch_count: int = Field(ge=0)
     terminated: bool
+    status: str
+
+
+class RecordProctoringEventRequest(AppBaseModel):
+    """Trusted, duration-qualified face proctoring event from the browser."""
+
+    connection_id: str = Field(min_length=1, max_length=255)
+    candidate_assessment_id: uuid.UUID
+    event_id: uuid.UUID
+    event_type: Literal["face_absent", "multiple_faces"]
+    condition_started_at: datetime
+    observed_duration_ms: int = Field(ge=3_000, le=3_600_000)
+    sample_count: int = Field(ge=1, le=10_000)
+    max_face_count: int = Field(ge=0, le=20)
+    min_confidence: float | None = Field(default=None, ge=0, le=1)
+    max_confidence: float | None = Field(default=None, ge=0, le=1)
+    source: Literal["mediapipe_face_detector", "camera_state"]
+    detector_version: str = Field(min_length=1, max_length=100)
+    model_name: str = Field(min_length=1, max_length=100)
+
+
+class RecordProctoringEventResponse(AppBaseModel):
+    """Deduplicated face occurrence and policy termination outcome."""
+
+    appended: bool
+    recorded: bool
+    occurrence_count: int = Field(ge=0)
+    terminated: bool
+    termination_reason: str | None = None
     status: str
 
 
